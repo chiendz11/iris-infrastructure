@@ -38,7 +38,7 @@ jobs:
   static:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.15.6"
@@ -59,7 +59,7 @@ jobs:
       matrix:
         stack: [bootstrap, platform]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.15.6"
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.15.6"
@@ -125,7 +125,7 @@ jobs:
       - name: Export non-secret infrastructure outputs
         run: terraform -chdir=terraform/platform output -json > terraform-outputs.json
       - name: Checkout GitOps desired state
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: chiendz11/iris-gitops
           token: ${{ secrets.GITOPS_TOKEN }}
