@@ -6,3 +6,5 @@ crash.log
 backend.hcl
 terraform.tfvars
 .env
+__pycache__/
+*.py[cod]
