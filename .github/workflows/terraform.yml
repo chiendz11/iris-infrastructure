@@ -1,0 +1,156 @@
+name: terraform-infrastructure
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - "environments/**"
+      - "scripts/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "environments/**"
+      - "scripts/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_state_bucket_name: ${{ vars.TF_STATE_BUCKET }}
+  TF_VAR_enable_public_domain: ${{ vars.ENABLE_PUBLIC_DOMAIN || 'false' }}
+  TF_VAR_public_domain_name: ${{ vars.PUBLIC_DOMAIN_NAME }}
+  TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+  TF_VAR_admin_role_arns: ${{ vars.ADMIN_ROLE_ARNS_JSON || '[]' }}
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.6"
+      - run: terraform fmt -check -recursive
+      - name: Validate bootstrap
+        working-directory: terraform/bootstrap
+        run: terraform init -backend=false && terraform validate
+      - name: Validate platform
+        working-directory: terraform/platform
+        run: terraform init -backend=false && terraform validate
+
+  plan:
+    if: github.event_name == 'pull_request' && vars.TERRAFORM_PLAN_ROLE_ARN != ''
+    needs: static
+    runs-on: ubuntu-latest
+    environment: terraform-plan
+    strategy:
+      matrix:
+        stack: [bootstrap, platform]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Initialize remote state
+        working-directory: terraform/${{ matrix.stack }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
+      - name: Plan
+        working-directory: terraform/${{ matrix.stack }}
+        run: |
+          if [[ "${{ matrix.stack }}" == "platform" ]]; then
+            terraform plan -no-color -var-file=../../environments/production.tfvars
+          else
+            terraform plan -no-color
+          fi
+
+  apply:
+    if: github.event_name != 'pull_request' && vars.TERRAFORM_APPLY_ROLE_ARN != ''
+    needs: static
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Initialize bootstrap remote state
+        working-directory: terraform/bootstrap
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
+      - name: Apply bootstrap
+        working-directory: terraform/bootstrap
+        run: |
+          terraform plan -out=tfplan
+          terraform apply tfplan
+
+      - name: Initialize platform remote state
+        working-directory: terraform/platform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
+      - name: Apply platform
+        working-directory: terraform/platform
+        run: |
+          terraform plan -var-file=../../environments/production.tfvars -out=tfplan
+          terraform apply tfplan
+      - name: Export non-secret infrastructure outputs
+        run: terraform -chdir=terraform/platform output -json > terraform-outputs.json
+      - name: Checkout GitOps desired state
+        uses: actions/checkout@v4
+        with:
+          repository: chiendz11/iris-gitops
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+      - name: Render infrastructure outputs into GitOps
+        run: |
+          python scripts/sync_gitops_outputs.py \
+            --outputs terraform-outputs.json \
+            --gitops gitops
+      - name: Open GitOps synchronization pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          cd gitops
+          if git diff --quiet; then
+            echo "GitOps already matches Terraform outputs."
+            exit 0
+          fi
+          BRANCH="infra/sync-${{ github.sha }}-${{ github.run_attempt }}"
+          git checkout -b "${BRANCH}"
+          git config user.name "iris-infra-bot"
+          git config user.email "iris-infra-bot@users.noreply.github.com"
+          git add -- applications environments platform
+          git commit -m "chore(platform): sync Terraform outputs"
+          git push origin "${BRANCH}"
+          gh pr create --repo chiendz11/iris-gitops --base main --head "${BRANCH}" \
+            --title "chore(platform): sync Terraform outputs" \
+            --body "Generated from chiendz11/iris-infrastructure@${{ github.sha }}. No secret values are included."

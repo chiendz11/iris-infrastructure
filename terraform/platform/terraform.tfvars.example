@@ -1,0 +1,23 @@
+aws_region          = "ap-southeast-1"
+project_name        = "iris-mlops"
+environment         = "prod"
+kubernetes_version  = "1.33"
+az_count             = 2
+node_instance_types  = ["t3.medium"]
+node_min_size        = 2
+node_desired_size    = 2
+node_max_size        = 3
+db_instance_class   = "db.t4g.micro"
+db_multi_az          = true
+
+# One NAT keeps GitHub/public registry egress. S3 uses its free gateway endpoint.
+enable_nat_gateway             = true
+single_nat_gateway             = true
+enable_interface_vpc_endpoints = false
+admin_role_arns                = ["arn:aws:iam::123456789012:role/YourAdminRole"]
+
+# Enable after placing your existing domain in a public Route53 hosted zone.
+enable_public_domain = false
+kserve_subdomain     = "api"
+# route53_zone_id    = "Z0123456789EXAMPLE"
+# public_domain_name = "example.com"

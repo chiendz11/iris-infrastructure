@@ -1,0 +1,14 @@
+project_name                   = "iris-mlops"
+environment                    = "prod"
+vpc_cidr                       = "10.42.0.0/16"
+az_count                       = 2
+enable_nat_gateway             = true
+single_nat_gateway             = true
+enable_interface_vpc_endpoints = false
+kubernetes_version             = "1.33"
+node_instance_types            = ["t3.medium"]
+node_min_size                  = 2
+node_desired_size              = 2
+node_max_size                  = 3
+db_instance_class              = "db.t4g.micro"
+db_multi_az                    = true
