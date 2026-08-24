@@ -29,8 +29,7 @@ terraform -chdir=terraform/bootstrap init -migrate-state \
   -backend-config=backend.hcl
 ```
 
-Tạo hai GitHub Environment `terraform-plan` và `production`, bật required reviewer, rồi cấu hình
-repository variables:
+Tạo GitHub Environment `prod`, bật required reviewer, rồi cấu hình environment variables:
 
 ```bash
 ./scripts/configure-github.sh \
@@ -46,15 +45,21 @@ Thêm `GITOPS_TOKEN` dưới dạng GitHub Secret. Token chỉ cần quyền t�
 Sau bootstrap, pull request chạy Terraform plan. Merge vào `main` chờ approval của GitHub
 Environment, apply bootstrap rồi platform, sau đó tự mở PR đồng bộ output vào `iris-gitops`.
 
+Sau platform apply đầu tiên, cấu hình các output AWS cho ba application repository bằng một lệnh:
+
+```bash
+./scripts/configure-app-repositories.sh
+```
+
 ## GitHub Variables và Secrets
 
-Variables: `AWS_REGION`, `TF_STATE_BUCKET`, `TF_STATE_KMS_KEY_ARN`,
+Environment `prod` variables: `AWS_REGION`, `TF_STATE_BUCKET`, `TF_STATE_KMS_KEY_ARN`,
 `TERRAFORM_PLAN_ROLE_ARN`, `TERRAFORM_APPLY_ROLE_ARN`, `ENABLE_PUBLIC_DOMAIN`,
 `PUBLIC_DOMAIN_NAME`, `ROUTE53_ZONE_ID`, `ADMIN_ROLE_ARNS_JSON`.
 
-Secret duy nhất pipeline hạ tầng hiện cần là `GITOPS_TOKEN`. Không lưu AWS access key: workflow
-assume role bằng OIDC. RDS password do RDS quản lý trong Secrets Manager và workload nhận qua
-External Secrets.
+Secret duy nhất pipeline hạ tầng hiện cần là `GITOPS_TOKEN` trong environment `prod`. Không lưu
+AWS access key: workflow assume role bằng OIDC và trust policy chỉ chấp nhận subject của environment
+`prod`. RDS password do RDS quản lý trong Secrets Manager và workload nhận qua External Secrets.
 
 ## Lưu ý quyền apply
 

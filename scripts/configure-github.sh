@@ -20,15 +20,15 @@ if [[ -n "$ADMIN_ROLE_ARN" ]]; then
   ADMIN_ROLE_ARNS=$(printf '["%s"]' "$ADMIN_ROLE_ARN")
 fi
 
-gh variable set AWS_REGION --repo "$REPOSITORY" --body "ap-southeast-1"
-gh variable set TF_STATE_BUCKET --repo "$REPOSITORY" --body "$STATE_BUCKET"
-gh variable set TF_STATE_KMS_KEY_ARN --repo "$REPOSITORY" --body "$KMS_KEY_ARN"
-gh variable set TERRAFORM_PLAN_ROLE_ARN --repo "$REPOSITORY" --body "$PLAN_ROLE_ARN"
-gh variable set TERRAFORM_APPLY_ROLE_ARN --repo "$REPOSITORY" --body "$APPLY_ROLE_ARN"
-gh variable set ENABLE_PUBLIC_DOMAIN --repo "$REPOSITORY" --body "true"
-gh variable set PUBLIC_DOMAIN_NAME --repo "$REPOSITORY" --body "$PUBLIC_DOMAIN"
-gh variable set ROUTE53_ZONE_ID --repo "$REPOSITORY" --body "$ROUTE53_ZONE_ID"
-gh variable set ADMIN_ROLE_ARNS_JSON --repo "$REPOSITORY" --body "$ADMIN_ROLE_ARNS"
+gh variable set AWS_REGION --repo "$REPOSITORY" --env prod --body "ap-southeast-1"
+gh variable set TF_STATE_BUCKET --repo "$REPOSITORY" --env prod --body "$STATE_BUCKET"
+gh variable set TF_STATE_KMS_KEY_ARN --repo "$REPOSITORY" --env prod --body "$KMS_KEY_ARN"
+gh variable set TERRAFORM_PLAN_ROLE_ARN --repo "$REPOSITORY" --env prod --body "$PLAN_ROLE_ARN"
+gh variable set TERRAFORM_APPLY_ROLE_ARN --repo "$REPOSITORY" --env prod --body "$APPLY_ROLE_ARN"
+gh variable set ENABLE_PUBLIC_DOMAIN --repo "$REPOSITORY" --env prod --body "true"
+gh variable set PUBLIC_DOMAIN_NAME --repo "$REPOSITORY" --env prod --body "$PUBLIC_DOMAIN"
+gh variable set ROUTE53_ZONE_ID --repo "$REPOSITORY" --env prod --body "$ROUTE53_ZONE_ID"
+gh variable set ADMIN_ROLE_ARNS_JSON --repo "$REPOSITORY" --env prod --body "$ADMIN_ROLE_ARNS"
 
 echo "Configured non-secret GitHub Actions variables for $REPOSITORY."
 echo "Add GITOPS_TOKEN as a repository secret, or replace it with a GitHub App token."

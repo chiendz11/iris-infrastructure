@@ -89,7 +89,7 @@ data "aws_iam_policy_document" "terraform_plan_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:terraform-plan"]
+      values   = ["repo:${var.github_repository}:environment:prod"]
     }
   }
 }
@@ -112,7 +112,7 @@ data "aws_iam_policy_document" "terraform_apply_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:production"]
+      values   = ["repo:${var.github_repository}:environment:prod"]
     }
   }
 }
