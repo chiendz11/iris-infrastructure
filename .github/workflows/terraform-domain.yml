@@ -192,10 +192,12 @@ jobs:
             DELEGATION_REQUIRED=true
           fi
 
-          echo "domain_name=$(terraform output -json domain_name | jq -r '. // ""')" >> "${GITHUB_OUTPUT}"
-          echo "domain_ready=${DOMAIN_READY}" >> "${GITHUB_OUTPUT}"
-          echo "delegation_required=${DELEGATION_REQUIRED}" >> "${GITHUB_OUTPUT}"
-          echo "name_servers=$(terraform output -json route53_name_servers | jq -c '.')" >> "${GITHUB_OUTPUT}"
+          {
+            echo "domain_name=$(terraform output -json domain_name | jq -r '. // ""')"
+            echo "domain_ready=${DOMAIN_READY}"
+            echo "delegation_required=${DELEGATION_REQUIRED}"
+            echo "name_servers=$(terraform output -json route53_name_servers | jq -c '.')"
+          } >> "${GITHUB_OUTPUT}"
           PLATFORM_SIGNATURE="$(
             printf '%s\n' \
               "$(terraform output -raw domain_name 2>/dev/null || true)" \

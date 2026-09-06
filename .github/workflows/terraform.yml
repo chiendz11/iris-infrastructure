@@ -54,11 +54,13 @@ jobs:
             esac
           done < <(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")
 
-          echo "foundation=${foundation}" >> "${GITHUB_OUTPUT}"
-          echo "governance=${governance}" >> "${GITHUB_OUTPUT}"
-          echo "github_config=${github_config}" >> "${GITHUB_OUTPUT}"
-          echo "domain=${domain}" >> "${GITHUB_OUTPUT}"
-          echo "platform=${platform}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "foundation=${foundation}"
+            echo "governance=${governance}"
+            echo "github_config=${github_config}"
+            echo "domain=${domain}"
+            echo "platform=${platform}"
+          } >> "${GITHUB_OUTPUT}"
 
           {
             echo "## Terraform roots changed"

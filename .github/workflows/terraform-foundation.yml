@@ -121,11 +121,13 @@ jobs:
             fi
           fi
 
-          echo "governance_reconcile_required=${GOVERNANCE_RECONCILE_REQUIRED}" >> "${GITHUB_OUTPUT}"
-          echo "governance_apply_role_arn=${CURRENT_GOVERNANCE_APPLY_ROLE_ARN}" >> "${GITHUB_OUTPUT}"
-          echo "github_config_apply_role_arn=${CURRENT_GITHUB_CONFIG_APPLY_ROLE_ARN}" >> "${GITHUB_OUTPUT}"
-          echo "domain_reconcile_required=${DOMAIN_RECONCILE_REQUIRED}" >> "${GITHUB_OUTPUT}"
-          echo "platform_reconcile_required=${PLATFORM_RECONCILE_REQUIRED}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "governance_reconcile_required=${GOVERNANCE_RECONCILE_REQUIRED}"
+            echo "governance_apply_role_arn=${CURRENT_GOVERNANCE_APPLY_ROLE_ARN}"
+            echo "github_config_apply_role_arn=${CURRENT_GITHUB_CONFIG_APPLY_ROLE_ARN}"
+            echo "domain_reconcile_required=${DOMAIN_RECONCILE_REQUIRED}"
+            echo "platform_reconcile_required=${PLATFORM_RECONCILE_REQUIRED}"
+          } >> "${GITHUB_OUTPUT}"
       - name: Publish foundation result
         working-directory: terraform/bootstrap
         env:
