@@ -1,0 +1,4 @@
+github_owner = "chiendz11"
+
+# Authentication is never configured here. Export a short-lived GitHub App
+# installation token as GITHUB_TOKEN before running Terraform locally.

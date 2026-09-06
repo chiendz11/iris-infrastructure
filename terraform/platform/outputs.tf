@@ -6,6 +6,11 @@ output "cluster_endpoint" {
   value = module.eks.cluster_endpoint
 }
 
+output "argocd_chart_version" {
+  description = "Argo CD chart version owned by the Terraform Helm release."
+  value       = helm_release.argocd.version
+}
+
 output "vpc_id" {
   value = module.vpc.vpc_id
 }
@@ -56,6 +61,21 @@ output "rds_master_secret_arn" {
   value = aws_db_instance.mlflow.master_user_secret[0].secret_arn
 }
 
+output "model_promotion_github_app_secret_arn" {
+  description = "Secret container for the model-promoter GitHub App; Terraform never manages its value."
+  value       = aws_secretsmanager_secret.model_promotion_github_app.arn
+}
+
+output "github_gitops_promotion_role_arn" {
+  description = "OIDC role used only by the GitOps model-release workflow to read its App credential."
+  value       = aws_iam_role.github_gitops_promotion.arn
+}
+
+output "github_dispatcher_publish_role_arn" {
+  description = "OIDC role used by iris-gitops/main to publish only the dispatcher ECR image."
+  value       = aws_iam_role.github_dispatcher_publish.arn
+}
+
 output "ecr_repository_urls" {
   value = {
     for key, repository in aws_ecr_repository.services : key => repository.repository_url
@@ -87,7 +107,7 @@ output "external_dns_role_arn" {
 }
 
 output "public_certificate_arn" {
-  value = try(aws_acm_certificate_validation.public[0].certificate_arn, null)
+  value = local.public_certificate_arn
 }
 
 output "kserve_hostname" {
@@ -95,11 +115,11 @@ output "kserve_hostname" {
 }
 
 output "public_domain_name" {
-  value = var.public_domain_name
+  value = local.public_domain_name
 }
 
 output "route53_zone_id" {
-  value = var.route53_zone_id
+  value = local.route53_zone_id
 }
 
 output "kserve_public_url" {

@@ -114,7 +114,7 @@ resource "aws_s3_bucket_notification" "dataset_events" {
 }
 
 resource "aws_ecr_repository" "services" {
-  for_each             = toset(["training", "mlflow", "inference"])
+  for_each             = toset(["training", "mlflow", "inference", "dispatcher"])
   name                 = "${local.name}/${each.key}"
   image_tag_mutability = "IMMUTABLE"
 

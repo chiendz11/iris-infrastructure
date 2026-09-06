@@ -1,0 +1,10 @@
+{
+  "name": "iris-gitops-bot",
+  "url": "https://github.com/chiendz11/iris-gitops",
+  "public": false,
+  "default_events": [],
+  "default_permissions": {
+    "contents": "write",
+    "pull_requests": "write"
+  }
+}

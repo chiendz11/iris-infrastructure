@@ -20,3 +20,9 @@ variable "github_repository" {
   type        = string
   default     = "chiendz11/iris-infrastructure"
 }
+
+variable "github_environment" {
+  description = "Protected GitHub Environment embedded in OIDC trust subjects."
+  type        = string
+  default     = "prod"
+}

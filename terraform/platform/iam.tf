@@ -74,8 +74,14 @@ data "aws_iam_policy_document" "argo_events" {
 
 data "aws_iam_policy_document" "external_secrets" {
   statement {
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_db_instance.mlflow.master_user_secret[0].secret_arn]
+    actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = concat(
+      [
+        aws_db_instance.mlflow.master_user_secret[0].secret_arn,
+        aws_secretsmanager_secret.model_promotion_github_app.arn,
+      ],
+      var.additional_external_secret_arns
+    )
   }
 }
 
@@ -84,7 +90,7 @@ data "aws_iam_policy_document" "external_dns" {
 
   statement {
     actions   = ["route53:ChangeResourceRecordSets"]
-    resources = var.route53_zone_id == null ? [] : ["arn:aws:route53:::hostedzone/${var.route53_zone_id}"]
+    resources = local.route53_zone_id == null ? [] : ["arn:aws:route53:::hostedzone/${local.route53_zone_id}"]
   }
 
   statement {
@@ -161,7 +167,10 @@ data "aws_iam_policy_document" "github_actions" {
       "ecr:UploadLayerPart",
       "ecr:BatchGetImage"
     ]
-    resources = [for repository in aws_ecr_repository.services : repository.arn]
+    resources = [
+      for name, repository in aws_ecr_repository.services : repository.arn
+      if name != "dispatcher"
+    ]
   }
 
   statement {
@@ -179,4 +188,103 @@ resource "aws_iam_role_policy" "github_actions" {
   name   = "build-and-publish"
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_actions.json
+}
+
+data "aws_iam_policy_document" "github_gitops_promotion_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [data.terraform_remote_state.bootstrap.outputs.github_oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.gitops_repository}:ref:refs/heads/main"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_gitops_promotion" {
+  name               = "${local.name}-github-gitops-promotion"
+  assume_role_policy = data.aws_iam_policy_document.github_gitops_promotion_trust.json
+}
+
+data "aws_iam_policy_document" "github_gitops_promotion" {
+  statement {
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = [aws_secretsmanager_secret.model_promotion_github_app.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_gitops_promotion" {
+  name   = "read-model-promoter-secret"
+  role   = aws_iam_role.github_gitops_promotion.id
+  policy = data.aws_iam_policy_document.github_gitops_promotion.json
+}
+
+data "aws_iam_policy_document" "github_dispatcher_publish_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [data.terraform_remote_state.bootstrap.outputs.github_oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.gitops_repository}:ref:refs/heads/main"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_dispatcher_publish" {
+  name               = "${local.name}-github-dispatcher-publish"
+  assume_role_policy = data.aws_iam_policy_document.github_dispatcher_publish_trust.json
+}
+
+data "aws_iam_policy_document" "github_dispatcher_publish" {
+  statement {
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:CompleteLayerUpload",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages",
+    ]
+    resources = [aws_ecr_repository.services["dispatcher"].arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_dispatcher_publish" {
+  name   = "publish-dispatcher-image"
+  role   = aws_iam_role.github_dispatcher_publish.id
+  policy = data.aws_iam_policy_document.github_dispatcher_publish.json
 }

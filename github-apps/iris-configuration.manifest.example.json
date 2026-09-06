@@ -1,0 +1,11 @@
+{
+  "name": "iris-configuration",
+  "url": "https://github.com/chiendz11/iris-infrastructure",
+  "public": false,
+  "default_events": [],
+  "default_permissions": {
+    "administration": "write",
+    "environments": "write",
+    "variables": "write"
+  }
+}

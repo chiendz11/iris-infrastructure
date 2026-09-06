@@ -1,0 +1,10 @@
+github_owner             = "chiendz11"
+enable_public_domain     = true
+public_domain_name       = "example.com"
+admin_role_arns          = ["arn:aws:iam::123456789012:role/eks-admin"]
+manage_application_config = true
+production_reviewer_usernames = ["mentor-github-login"]
+gitops_app_client_id           = "Iv23liEXAMPLE"
+
+# State bucket/KMS inputs are normally supplied by CI as TF_VAR_* variables.
+# GitHub authentication is supplied only as a short-lived GITHUB_TOKEN.

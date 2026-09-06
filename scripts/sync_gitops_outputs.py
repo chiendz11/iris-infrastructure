@@ -104,6 +104,13 @@ def main() -> None:
         rf"\1 {roles['argo_events']}",
     )
 
+    sensor = root / "environments/production/data-pipeline/sensor.yaml"
+    replace(
+        sensor,
+        r'^(\s*dataTemplate: ")[^"]+(?=:\{\{)',
+        rf"\1{repositories['training']}",
+    )
+
     workflow = root / "environments/production/data-pipeline/workflow-template.yaml"
     replace(
         workflow,

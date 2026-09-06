@@ -1,0 +1,115 @@
+# The exact chart version is pinned in argocd-chart-version.txt. Terraform is
+# the only owner; iris-gitops must never declare an Application for Argo CD.
+
+crds:
+  install: true
+  keep: true
+
+global:
+  logging:
+    format: json
+    level: info
+  networkPolicy:
+    create: true
+    defaultDenyIngress: true
+  affinity:
+    podAntiAffinity: soft
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+
+configs:
+  cm:
+    admin.enabled: false
+    exec.enabled: false
+    application.resourceTrackingMethod: annotation
+  params:
+    server.insecure: false
+  rbac:
+    policy.default: ""
+    policy.matchMode: glob
+    scopes: "[groups]"
+    policy.csv: |
+      p, role:mlops-developer, applications, get, iris-production/*, allow
+      p, role:mlops-developer, applications, sync, iris-production/*, allow
+      p, role:mlops-developer, logs, get, iris-production/*, allow
+      p, role:mlops-viewer, applications, get, iris-production/*, allow
+      p, role:mlops-viewer, logs, get, iris-production/*, allow
+      g, platform-admins, role:admin
+      g, mlops-developers, role:mlops-developer
+      g, mlops-viewers, role:mlops-viewer
+
+# SSO is enabled only after a real IdP client exists. Until then operators use
+# `argocd login --core` through EKS RBAC. See argocd-values-sso.example.yaml.
+dex:
+  enabled: false
+
+redis-ha:
+  enabled: true
+  exporter:
+    enabled: true
+  haproxy:
+    enabled: true
+    metrics:
+      enabled: true
+  topologySpreadConstraints:
+    enabled: true
+    topologyKey: topology.kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+
+controller:
+  replicas: 1
+  pdb:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  metrics:
+    enabled: true
+
+server:
+  replicas: 2
+  pdb:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  service:
+    type: ClusterIP
+  metrics:
+    enabled: true
+
+repoServer:
+  replicas: 2
+  pdb:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  metrics:
+    enabled: true
+
+applicationSet:
+  replicas: 2
+  pdb:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  metrics:
+    enabled: true
+
+notifications:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+
+redisSecretInit:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
