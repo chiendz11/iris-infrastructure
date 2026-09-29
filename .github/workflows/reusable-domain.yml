@@ -1,0 +1,180 @@
+name: reusable-domain
+
+on:
+  workflow_call:
+    inputs:
+      foundation:
+        description: Selected non-secret outputs from foundation in this run; empty uses existing configuration
+        type: string
+        default: '{}'
+    outputs:
+      domain_ready:
+        description: Non-secret domain_ready
+        value: ${{ jobs.apply-domain-zone.outputs.domain_ready }}
+      delegation_required:
+        description: Non-secret delegation_required
+        value: ${{ jobs.apply-domain-zone.outputs.delegation_required }}
+      previous_platform_signature:
+        description: Non-secret previous_platform_signature
+        value: ${{ jobs.apply-domain-zone.outputs.previous_platform_signature }}
+      zone_platform_signature:
+        description: Non-secret zone_platform_signature
+        value: ${{ jobs.apply-domain-zone.outputs.zone_platform_signature }}
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_enable_public_domain: ${{ vars.ENABLE_PUBLIC_DOMAIN || 'false' }}
+  TF_VAR_domain_name: ${{ vars.PUBLIC_DOMAIN_NAME }}
+
+jobs:
+  apply-domain-zone:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      domain_name: ${{ steps.outputs.outputs.domain_name }}
+      domain_ready: ${{ steps.outputs.outputs.domain_ready }}
+      delegation_required: ${{ steps.outputs.outputs.delegation_required }}
+      name_servers: ${{ steps.outputs.outputs.name_servers }}
+      previous_platform_signature: ${{ steps.phase.outputs.platform_signature }}
+      zone_platform_signature: ${{ steps.outputs.outputs.platform_signature }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Reject stale or non-production execution before credentials
+        run: bash scripts/assert-current-main.sh
+      - name: Validate production automation configuration
+        env:
+          APPLY_ROLE_ARN: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          STATE_BUCKET: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+          STATE_KMS_KEY_ARN: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+        run: |
+          test -n "${APPLY_ROLE_ARN}" || { echo "TERRAFORM_APPLY_ROLE_ARN is required." >&2; exit 1; }
+          test -n "${STATE_BUCKET}" || { echo "TF_STATE_BUCKET is required." >&2; exit 1; }
+          test -n "${STATE_KMS_KEY_ARN}" || { echo "TF_STATE_KMS_KEY_ARN is required." >&2; exit 1; }
+          if [[ "${TF_VAR_enable_public_domain}" == "true" ]]; then
+            test -n "${TF_VAR_domain_name}" || { echo "PUBLIC_DOMAIN_NAME is required." >&2; exit 1; }
+          fi
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Publish reconciliation provenance
+        env:
+          SOURCE: ${{ github.event_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## Domain reconciliation"
+            echo
+            echo "- Requested by: ${SOURCE}"
+            echo "- Initiating commit: \`${SOURCE_SHA}\`"
+            echo "- Applied ref: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Initialize domain state
+        working-directory: terraform/domain
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}"
+      - name: Install DNS verification tools
+        run: |
+          if ! command -v dig >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y dnsutils
+          fi
+      - name: Determine current domain phase
+        id: phase
+        working-directory: terraform/domain
+        run: |
+          CURRENT_DOMAIN="$(terraform output -raw domain_name 2>/dev/null || true)"
+          CURRENT_READY="$(terraform output -raw domain_ready 2>/dev/null || echo false)"
+          CURRENT_ZONE_ID="$(terraform output -raw route53_zone_id 2>/dev/null || true)"
+          CURRENT_CERTIFICATE_ARN="$(terraform output -raw public_certificate_arn 2>/dev/null || true)"
+          CURRENT_STATE_PRESENT=false
+          if terraform state pull >/dev/null 2>&1; then
+            CURRENT_STATE_PRESENT=true
+          fi
+          DOMAIN_DELEGATED="$(
+            bash ../../scripts/detect-domain-delegation.sh \
+              "${TF_VAR_enable_public_domain}" \
+              "${TF_VAR_domain_name}"
+          )"
+
+          echo "domain_delegated=${DOMAIN_DELEGATED}" >> "${GITHUB_OUTPUT}"
+          PLATFORM_SIGNATURE="$(
+            printf '%s\n' \
+              "${CURRENT_DOMAIN}" \
+              "${CURRENT_READY}" \
+              "${CURRENT_ZONE_ID}" \
+              "${CURRENT_CERTIFICATE_ARN}" \
+              "${CURRENT_STATE_PRESENT}" |
+              sha256sum |
+              cut -d ' ' -f 1
+          )"
+          echo "platform_signature=${PLATFORM_SIGNATURE}" >> "${GITHUB_OUTPUT}"
+      - name: Apply domain foundation
+        working-directory: terraform/domain
+        env:
+          TF_VAR_domain_delegated: ${{ steps.phase.outputs.domain_delegated }}
+        run: |
+          terraform plan -out=tfplan
+          bash ../../scripts/assert-current-main.sh
+          terraform apply tfplan
+      - name: Export domain state
+        id: outputs
+        working-directory: terraform/domain
+        run: |
+          DOMAIN_READY="$(terraform output -raw domain_ready)"
+          DELEGATION_REQUIRED=false
+          if [[ "${TF_VAR_enable_public_domain}" == "true" && \
+                "${DOMAIN_READY}" != "true" ]]; then
+            DELEGATION_REQUIRED=true
+          fi
+
+          {
+            echo "domain_name=$(terraform output -json domain_name | jq -r '. // ""')"
+            echo "domain_ready=${DOMAIN_READY}"
+            echo "delegation_required=${DELEGATION_REQUIRED}"
+            echo "name_servers=$(terraform output -json route53_name_servers | jq -c '.')"
+          } >> "${GITHUB_OUTPUT}"
+          PLATFORM_SIGNATURE="$(
+            printf '%s\n' \
+              "$(terraform output -raw domain_name 2>/dev/null || true)" \
+              "${DOMAIN_READY}" \
+              "$(terraform output -raw route53_zone_id 2>/dev/null || true)" \
+              "$(terraform output -raw public_certificate_arn 2>/dev/null || true)" \
+              "true" |
+              sha256sum |
+              cut -d ' ' -f 1
+          )"
+          echo "platform_signature=${PLATFORM_SIGNATURE}" >> "${GITHUB_OUTPUT}"
+      - name: Publish Route53 delegation details
+        if: steps.outputs.outputs.delegation_required == 'true'
+        env:
+          DOMAIN_NAME: ${{ steps.outputs.outputs.domain_name }}
+          NAME_SERVERS: ${{ steps.outputs.outputs.name_servers }}
+        run: |
+          {
+            echo "## Registrar action required"
+            echo
+            echo "Delegate ${DOMAIN_NAME} to these Route53 name servers."
+            echo "A separate terraform-domain-certificate.yml run will wait for your prod approval."
+            echo "Update the registrar first, then approve that run. It will verify DNS before requesting ACM."
+            echo
+            echo '```json'
+            jq . <<<"${NAME_SERVERS}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

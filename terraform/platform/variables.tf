@@ -63,7 +63,18 @@ variable "enable_interface_vpc_endpoints" {
 
 variable "kubernetes_version" {
   type    = string
-  default = "1.33"
+  default = "1.34"
+}
+
+variable "ebs_csi_addon_version" {
+  description = "Exact EKS build to pin after checking regional compatibility. Null selects AWS's default compatible version (not most_recent)."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.ebs_csi_addon_version == null || can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+-eksbuild\\.[0-9]+$", var.ebs_csi_addon_version))
+    error_message = "Use a compatible EKS add-on version such as vX.Y.Z-eksbuild.N, or null."
+  }
 }
 
 variable "node_instance_types" {
@@ -139,17 +150,32 @@ variable "admin_role_arns" {
 }
 
 variable "github_repositories" {
-  description = "Repositories allowed to assume the shared build/publish role."
-  type        = list(string)
-  default = [
-    "chiendz11/iris-data-pipeline",
-    "chiendz11/iris-model-registry",
-    "chiendz11/iris-inference-service"
-  ]
+  description = "Repository identity for each least-privilege application publisher role."
+  type        = map(string)
+  default = {
+    training  = "chiendz11/iris-data-pipeline"
+    mlflow    = "chiendz11/iris-model-registry"
+    inference = "chiendz11/iris-inference-service"
+  }
+
+  validation {
+    condition = (
+      length(var.github_repositories) == 3 &&
+      length(setsubtract(
+        toset(keys(var.github_repositories)),
+        toset(["inference", "mlflow", "training"]),
+      )) == 0 &&
+      alltrue([
+        for repository in values(var.github_repositories) :
+        can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repository))
+      ])
+    )
+    error_message = "github_repositories must define valid training, mlflow and inference owner/name identities."
+  }
 }
 
 variable "gitops_repository" {
-  description = "GitOps repository allowed to read the model-promoter credential through GitHub OIDC."
+  description = "GitOps repository whose trusted main workflows may read the GitOps automation credential through OIDC."
   type        = string
   default     = "chiendz11/iris-gitops"
 

@@ -19,11 +19,12 @@ resource "github_repository_ruleset" "main" {
     required_linear_history = true
 
     pull_request {
-      allowed_merge_methods             = ["squash", "rebase"]
-      dismiss_stale_reviews_on_push     = true
-      require_code_owner_review         = true
-      require_last_push_approval        = true
-      required_approving_review_count   = 1
+      allowed_merge_methods         = ["squash", "rebase"]
+      dismiss_stale_reviews_on_push = true
+      # Solo capstone: PR + required CI remain mandatory, a second human does not.
+      require_code_owner_review         = false
+      require_last_push_approval        = false
+      required_approving_review_count   = 0
       required_review_thread_resolution = true
     }
 
@@ -45,5 +46,12 @@ resource "github_repository_ruleset" "main" {
   # Retiring a repository therefore requires an explicit two-step break-glass change.
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition = !var.discover_existing_rulesets || !contains(keys(var.existing_ruleset_ids), each.key) || (
+        lookup(var.existing_ruleset_ids, each.key, 0) == lookup(local.discovered_ruleset_ids, each.key, -1)
+      )
+      error_message = "An explicitly supplied expected ruleset ID for ${each.key} is stale or does not match discovery. Review the migration assertion; do not silently import another object."
+    }
   }
 }

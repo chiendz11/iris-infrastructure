@@ -50,23 +50,22 @@ variable "repository_rulesets" {
   }
 }
 
-# These IDs are public GitHub metadata for the rulesets that already exist.
-# Importing them prevents Terraform from creating a second, layered ruleset.
-variable "existing_ruleset_ids" {
-  description = "Existing protect-main ruleset IDs used for the one-time declarative import."
-  type        = map(number)
-
-  default = {
-    iris-infrastructure    = 21312051
-    iris-gitops            = 21312006
-    iris-data-pipeline     = 21312047
-    iris-model-registry    = 21312049
-    iris-inference-service = 21312050
-  }
+variable "discover_existing_rulesets" {
+  description = "Read and verify repository-owned protect-main rulesets before import/create. Disable only for speculative PR plans without privileged credentials."
+  type        = bool
+  default     = true
 }
 
-check "every_ruleset_has_an_import_identity" {
-  assert {
+variable "existing_ruleset_ids" {
+  description = "Optional expected IDs for migration assertions, NOT unconditional imports. Protected plans verify these against discovery; normally leave empty."
+  type        = map(number)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for id in values(var.existing_ruleset_ids) : id > 0 && id == floor(id)])
+    error_message = "Expected ruleset IDs must be positive integers."
+  }
+  validation {
     condition     = length(setsubtract(toset(keys(var.existing_ruleset_ids)), toset(keys(var.repository_rulesets)))) == 0
     error_message = "Every existing_ruleset_ids key must also exist in repository_rulesets."
   }

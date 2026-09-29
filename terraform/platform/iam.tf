@@ -78,7 +78,7 @@ data "aws_iam_policy_document" "external_secrets" {
     resources = concat(
       [
         aws_db_instance.mlflow.master_user_secret[0].secret_arn,
-        aws_secretsmanager_secret.model_promotion_github_app.arn,
+        aws_secretsmanager_secret.model_release_publisher_github_app.arn,
       ],
       var.additional_external_secret_arns
     )
@@ -123,7 +123,9 @@ resource "aws_iam_role_policy_attachment" "service_account" {
   policy_arn = each.value.arn
 }
 
-data "aws_iam_policy_document" "github_trust" {
+data "aws_iam_policy_document" "github_application_trust" {
+  for_each = var.github_repositories
+
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -141,17 +143,20 @@ data "aws_iam_policy_document" "github_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [for repository in var.github_repositories : "repo:${repository}:environment:prod"]
+      values   = ["repo:${each.value}:environment:prod"]
     }
   }
 }
 
-resource "aws_iam_role" "github_actions" {
-  name               = "${local.name}-github-actions"
-  assume_role_policy = data.aws_iam_policy_document.github_trust.json
+resource "aws_iam_role" "github_application_publisher" {
+  for_each           = var.github_repositories
+  name               = "${local.name}-github-${replace(each.key, "_", "-")}-publisher"
+  assume_role_policy = data.aws_iam_policy_document.github_application_trust[each.key].json
 }
 
-data "aws_iam_policy_document" "github_actions" {
+data "aws_iam_policy_document" "github_application_publisher" {
+  for_each = var.github_repositories
+
   statement {
     actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
@@ -165,32 +170,37 @@ data "aws_iam_policy_document" "github_actions" {
       "ecr:InitiateLayerUpload",
       "ecr:PutImage",
       "ecr:UploadLayerPart",
-      "ecr:BatchGetImage"
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages"
     ]
-    resources = [
-      for name, repository in aws_ecr_repository.services : repository.arn
-      if name != "dispatcher"
-    ]
+    resources = [aws_ecr_repository.services[each.key].arn]
   }
 
-  statement {
-    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
-    resources = [aws_s3_bucket.platform["dvc"].arn]
+  dynamic "statement" {
+    for_each = each.key == "training" ? [true] : []
+    content {
+      actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+      resources = [aws_s3_bucket.platform["dvc"].arn]
+    }
   }
 
-  statement {
-    actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.platform["dvc"].arn}/*"]
+  dynamic "statement" {
+    for_each = each.key == "training" ? [true] : []
+    content {
+      actions   = ["s3:GetObject", "s3:PutObject"]
+      resources = ["${aws_s3_bucket.platform["dvc"].arn}/*"]
+    }
   }
 }
 
-resource "aws_iam_role_policy" "github_actions" {
-  name   = "build-and-publish"
-  role   = aws_iam_role.github_actions.id
-  policy = data.aws_iam_policy_document.github_actions.json
+resource "aws_iam_role_policy" "github_application_publisher" {
+  for_each = var.github_repositories
+  name     = "build-and-publish"
+  role     = aws_iam_role.github_application_publisher[each.key].id
+  policy   = data.aws_iam_policy_document.github_application_publisher[each.key].json
 }
 
-data "aws_iam_policy_document" "github_gitops_promotion_trust" {
+data "aws_iam_policy_document" "github_gitops_automation_trust" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -213,28 +223,45 @@ data "aws_iam_policy_document" "github_gitops_promotion_trust" {
   }
 }
 
-resource "aws_iam_role" "github_gitops_promotion" {
-  name               = "${local.name}-github-gitops-promotion"
-  assume_role_policy = data.aws_iam_policy_document.github_gitops_promotion_trust.json
+resource "aws_iam_role" "github_gitops_automation" {
+  name               = "${local.name}-github-gitops-automation"
+  assume_role_policy = data.aws_iam_policy_document.github_gitops_automation_trust.json
 }
 
-data "aws_iam_policy_document" "github_gitops_promotion" {
+data "aws_iam_policy_document" "github_gitops_automation" {
   statement {
     actions = [
       "secretsmanager:DescribeSecret",
       "secretsmanager:GetSecretValue",
     ]
-    resources = [aws_secretsmanager_secret.model_promotion_github_app.arn]
+    resources = [aws_secretsmanager_secret.gitops_automation_github_app.arn]
+  }
+
+  # Renderer workflows verify immutable Cosign signatures before opening a
+  # release PR. They can inspect images but cannot upload, retag or delete any.
+  statement {
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = [for repository in aws_ecr_repository.services : repository.arn]
   }
 }
 
-resource "aws_iam_role_policy" "github_gitops_promotion" {
-  name   = "read-model-promoter-secret"
-  role   = aws_iam_role.github_gitops_promotion.id
-  policy = data.aws_iam_policy_document.github_gitops_promotion.json
+resource "aws_iam_role_policy" "github_gitops_automation" {
+  name   = "read-gitops-automation-secret"
+  role   = aws_iam_role.github_gitops_automation.id
+  policy = data.aws_iam_policy_document.github_gitops_automation.json
 }
 
-data "aws_iam_policy_document" "github_dispatcher_publish_trust" {
+data "aws_iam_policy_document" "github_release_automation_publish_trust" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -257,12 +284,12 @@ data "aws_iam_policy_document" "github_dispatcher_publish_trust" {
   }
 }
 
-resource "aws_iam_role" "github_dispatcher_publish" {
-  name               = "${local.name}-github-dispatcher-publish"
-  assume_role_policy = data.aws_iam_policy_document.github_dispatcher_publish_trust.json
+resource "aws_iam_role" "github_release_automation_publish" {
+  name               = "${local.name}-github-release-automation-publish"
+  assume_role_policy = data.aws_iam_policy_document.github_release_automation_publish_trust.json
 }
 
-data "aws_iam_policy_document" "github_dispatcher_publish" {
+data "aws_iam_policy_document" "github_release_automation_publish" {
   statement {
     actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
@@ -283,8 +310,8 @@ data "aws_iam_policy_document" "github_dispatcher_publish" {
   }
 }
 
-resource "aws_iam_role_policy" "github_dispatcher_publish" {
-  name   = "publish-dispatcher-image"
-  role   = aws_iam_role.github_dispatcher_publish.id
-  policy = data.aws_iam_policy_document.github_dispatcher_publish.json
+resource "aws_iam_role_policy" "github_release_automation_publish" {
+  name   = "publish-release-automation-image"
+  role   = aws_iam_role.github_release_automation_publish.id
+  policy = data.aws_iam_policy_document.github_release_automation_publish.json
 }

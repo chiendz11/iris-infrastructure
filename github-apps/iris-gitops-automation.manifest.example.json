@@ -1,6 +1,6 @@
 {
-  "name": "iris-model-promoter",
-  "url": "https://github.com/chiendz11/iris-gitops/tree/main/automation/model-release-dispatcher",
+  "name": "iris-gitops-automation",
+  "url": "https://github.com/chiendz11/iris-gitops/tree/main/automation",
   "public": false,
   "default_events": [],
   "default_permissions": {

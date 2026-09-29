@@ -1,7 +1,9 @@
 aws_region          = "ap-southeast-1"
 project_name        = "iris-mlops"
 environment         = "prod"
-kubernetes_version  = "1.33"
+kubernetes_version  = "1.34"
+# Null selects AWS's default compatible build. Pin the resolved output after review.
+ebs_csi_addon_version = null
 az_count             = 2
 node_instance_types  = ["t3.medium"]
 node_min_size        = 3

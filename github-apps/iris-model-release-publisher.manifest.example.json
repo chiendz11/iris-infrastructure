@@ -1,0 +1,9 @@
+{
+  "name": "iris-model-release-publisher",
+  "url": "https://github.com/chiendz11/iris-gitops/tree/main/automation/model_release",
+  "public": false,
+  "default_events": [],
+  "default_permissions": {
+    "actions": "write"
+  }
+}

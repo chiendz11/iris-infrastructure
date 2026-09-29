@@ -1,173 +1,88 @@
-# GitHub ruleset lifecycle
+# GitHub ruleset lifecycle — solo production capstone
 
-## Ownership boundary
+## Ownership
 
-`terraform/github-governance` is the only desired-state writer for repository rulesets. GitHub's
-Settings UI is an inspection/break-glass surface, not the normal update path. The migration helper
-only verifies effective rules and removes two legacy classic branch protections; it never creates
-or updates a ruleset.
+`terraform/github-governance` is the desired-state owner of `protect-main` across all five repos.
+Normal lifecycle: PR -> required CI -> operator merges -> owner self-approves `prod` job -> Terraform
+plan/guard/apply -> `scripts/migrate-rulesets.sh` verifies the policy. No second human is required.
 
-```text
-Git pull request
-      |
-      v
-Terraform configuration + reviewable plan
-      |
-      v
-github_repository_ruleset
-      |
-      v
-GitHub protect-main ruleset
-```
-
-State is isolated at `s3://<state-bucket>/infrastructure/github-governance.tfstate`. Dedicated OIDC
-roles can access only that state object and its lock; the governance apply role has no permission to
-mutate AWS infrastructure.
-
-## Desired protection
-
-All five rulesets target `~DEFAULT_BRANCH` and enforce:
-
-- pull requests with one approval;
-- CODEOWNER review and stale-review dismissal;
-- approval of the last reviewable push by someone other than its author;
-- resolved review threads;
-- strict required status checks bound to GitHub Actions App integration ID `15368`;
-- squash or rebase merge only and linear history;
-- no force-push or branch deletion;
-- no permanent bypass actor.
-
-Required checks are stable aggregate jobs:
+Rulesets still require a PR, strict CI from GitHub Actions, resolved conversations and linear
+history; force-push and branch deletion remain blocked. No permanent bypass actor is added.
+`required_approving_review_count=0`, `require_code_owner_review=false`,
+`require_last_push_approval=false`. CODEOWNERS remains ownership documentation.
+Stale-review dismissal is retained for optional reviews.
 
 | Repository | Required check |
 |---|---|
-| `iris-infrastructure` | `pr-gate` |
-| `iris-gitops` | `validate` |
-| `iris-data-pipeline` | `ci-gate` |
-| `iris-model-registry` | `ci-gate` |
-| `iris-inference-service` | `ci-gate` |
+| iris-infrastructure | pr-gate |
+| iris-gitops | validate |
+| iris-data-pipeline | ci-gate |
+| iris-model-registry | ci-gate |
+| iris-inference-service | ci-gate |
 
-When renaming a required check, first emit both old and new checks, then update the Terraform
-ruleset, and only afterward remove the old check. Changing both sides in one PR can lock all merges.
+When renaming checks, emit both old and new names first, update the ruleset, then retire the old
+check. A rule requiring a nonexistent check will block a solo operator just like any other author.
 
-## Root of trust
+## Credentials and state
 
-Terraform cannot safely create every credential that grants Terraform control over GitHub. Create
-the dedicated governance App manually (the reviewed manifest is
-`github-apps/iris-governance.manifest.example.json`):
+State stays at `infrastructure/github-governance.tfstate` in the S3/KMS backend.
+Dedicated OIDC state roles do not mutate AWS infrastructure. The separate `iris-governance` App
+has Administration write on exactly the five repos; its private key stays in
+`iris-infrastructure/prod` as `GOVERNANCE_APP_PRIVATE_KEY`, with Client ID variable
+`GOVERNANCE_APP_CLIENT_ID`. Terraform receives only the short-lived installation token.
+App creation/installation remains manual; see `GITHUB_CONTROL_PLANE.md`.
 
-1. Create `iris-governance` under the GitHub account settings; a webhook is not required.
-2. Grant Repository permission `Administration: Read and write`; Metadata read is implicit.
-3. Install it only on the five Iris repositories.
-4. Create a private key.
-5. In `iris-infrastructure` Environment `prod`, set variable `GOVERNANCE_APP_CLIENT_ID`.
-6. In the same Environment, set secret `GOVERNANCE_APP_PRIVATE_KEY` to the PEM content.
-7. Require an independent reviewer and allow deployments only from protected branches.
+The Environment remains a protected-branch credential boundary with the owner as required deployment
+reviewer and self-review allowed. It is not a two-person approval process. No workflow automatically merges PRs.
+Contents/PR-write tokens used by GitOps could technically merge a passing PR under zero-review
+policy; human-only merge is an operating convention, not an enforced identity restriction.
 
-Example CLI configuration after the Environment exists:
+## Adopt existing configuration
 
-```bash
-gh variable set GOVERNANCE_APP_CLIENT_ID \
-  --repo chiendz11/iris-infrastructure \
-  --env prod \
-  --body '<github-app-client-id>'
+1. Ensure the required checks exist and pass on relevant PRs.
+2. Bootstrap foundation/state/OIDC once, or reuse the existing remote state.
+3. Seed root variables/Apps. For a fresh setup use `configure-github.sh <domain> <admin-role-or-empty>`.
+4. To enable owner self-approval on an existing infrastructure Environment, the operator runs
+   `bash scripts/configure-solo-environment.sh`. This changes only `iris-infrastructure/prod`
+   protection, not variables, secrets or rulesets. App Environments are changed by Terraform.
+5. Keep `existing_ruleset_ids={}` unless deliberately asserting a migration identity. The native
+   Terraform discovery reads repository-owned rulesets, verifies one matching `protect-main`
+   branch policy and imports it; repositories without one get a new resource. No hardcoded IDs
+   need copying. Duplicate matches, wrong target, pagination and failed reads stop the plan.
+6. Merge the governance changes. If old review rules prevent the first solo merge, temporarily
+   change only the three review requirements through the owner UI/CLI as an explicitly recorded
+   one-time migration. Keep PR/CI/force-push protections. Then apply Terraform to converge to Git.
+   Code not yet merged/applied cannot remove an already enforced remote gate.
+7. Run `bash scripts/migrate-rulesets.sh` to verify. Governance CI also performs this automatically.
+8. Only if the two documented legacy classic protections still exist, inspect them and explicitly
+   run `bash scripts/migrate-rulesets.sh --remove-legacy` after verifying the Terraform rulesets.
+   This deletes classic protections only on iris-infrastructure and iris-gitops; it leaves active
+   Terraform rulesets in place. Never run migration deletion merely to bypass a failed check.
 
-gh secret set GOVERNANCE_APP_PRIVATE_KEY \
-  --repo chiendz11/iris-infrastructure \
-  --env prod \
-  < /path/to/iris-governance.private-key.pem
-```
+Rulesets and classic branch protection can both apply. The verifier checks the owned ruleset;
+it does not prove there are no other organization or classic restrictions.
 
-The PEM is a long-lived root credential, but the workflow never hands it to Terraform. A pinned
-GitHub-maintained Action exchanges it for an installation token scoped to the five repositories;
-the token expires after one hour and is revoked at job completion. Do not reuse this App as the
-GitOps deployment-PR bot because that bot needs different Contents/Pull requests permissions.
+## Day-2 and recovery
 
-## Initial adoption sequence
-
-The rulesets already exist outside Terraform. Their public IDs are declared in `import.tf`, so the
-first apply adopts them instead of creating a second active layer.
-
-Use this order to avoid a dependency race:
-
-1. Merge the `ci-gate` and `CODEOWNERS` changes in all three application repositories; confirm each
-   new check has completed successfully at least once.
-2. Reconcile `terraform/bootstrap` to create the dedicated governance plan/apply state roles.
-3. Run the day-0 `scripts/configure-github.sh` bridge so governance/config role ARNs are written to
-   repository and `prod` Environment variables. After GitHub configuration adoption, Terraform owns
-   these values.
-4. Create/install the GitHub App and configure its Client ID/private key as described above.
-5. Merge the governance root/workflow to `iris-infrastructure/main`; approve its `prod` job. When
-   the same merge also changes `terraform/bootstrap`, the direct governance run deliberately skips
-   and `terraform-foundation.yml` dispatches a replacement run with the newly created governance
-   role ARN. This preserves dependency order without a manual rerun.
-6. The first plan imports all five existing `protect-main` resources, updates their review/check
-   rules and records them in the isolated remote state.
-7. Verify without mutation:
-
-   ```bash
-   GH_TOKEN='<administration-read-token>' scripts/migrate-rulesets.sh
-   ```
-
-8. Remove only the two pre-existing classic branch protections after verification:
-
-   ```bash
-   GH_TOKEN='<administration-write-token>' \
-     scripts/migrate-rulesets.sh --remove-legacy
-   ```
-
-Classic protection and rulesets are cumulative. Skipping step 8 leaves two control planes active on
-`iris-infrastructure` and `iris-gitops`, including the obsolete infrastructure check `static`.
-
-## Normal day-2 lifecycle
-
-```text
-PR changes terraform/github-governance
-        |
-        +--> fmt/validate
-        +--> speculative plan with state-only AWS plan role
-             (no GitHub Administration credential)
-        |
-        v
-pr-gate + CODEOWNER review
-        |
-        v
-merge main
-        |
-        v
-Environment prod approval
-        |
-        +--> mint short-lived GitHub App token
-        +--> refreshed saved plan
-        +--> reject delete/replace
-        +--> apply exact plan
-        +--> verify all effective rules through GitHub API
-```
-
-`workflow_dispatch` is only for drift reconciliation or recovery:
+Changes remain PR -> CI -> operator merge -> `production-infra.yml` (stage governance). Dispatch is for retries
+or reconciliation without a new commit:
 
 ```bash
-gh workflow run terraform-governance.yml \
-  --repo chiendz11/iris-infrastructure \
-  --ref main \
-  --field source=manual
+gh workflow run production-infra.yml \
+  --repo chiendz11/iris-infrastructure --ref main --field scope=governance
 ```
 
-PR jobs never receive the App private key or a write token. The repositories are currently public,
-so the GitHub provider can read existing rule metadata during import. If they become private, move
-speculative planning to a trusted Terraform runner or use a separate read-only App credential behind
-an approval gate; never expose the write App key to pull-request-controlled code.
+Terraform `prevent_destroy` and the saved-plan guard reject accidental ruleset deletion/replacement.
+If a wrong required-check name locks all merges, repair only the offending rule using the owner
+account, record the break-glass action, repair Git and reconcile Terraform. Do not keep a permanent
+bypass or delete the state.
 
-## Break-glass
+PR plans do not receive App write credentials and explicitly disable live discovery/imports.
+They use existing state with `-refresh=false`; a create in a first-adoption PR is speculative,
+not evidence the remote object is absent. The protected job discovers and refreshes before its
+saved plan/apply. Do not expose the governance App private key to PR-controlled code or apply a
+discovery-disabled speculative plan. Native provider discovery handles only complete API lists;
+if a next-page link appears, extend the implementation before retrying (never silently ignore it).
 
-`lifecycle.prevent_destroy` blocks accidental ruleset deletion. If a bad check name or credential
-change locks automation:
-
-1. An account/repository owner temporarily disables the offending ruleset in GitHub Settings.
-2. Repair the workflow/check or App installation and rotate the App private key if necessary.
-3. Run Terraform locally with a short-lived Administration token, or rerun the protected workflow.
-4. Confirm `scripts/migrate-rulesets.sh` passes and enforcement is `active` again.
-
-Do not configure a permanent admin/App bypass merely to simplify the capstone. With one approval,
-CODEOWNER review and last-push approval, a second human collaborator is required for PRs authored by
-`chiendz11`.
+See `SOLO_OPERATION.md` for the full solo migration and `ROLLBACK_RUNBOOK.md` for cross-repository
+recovery. These runbooks describe procedures; they do not imply a restore drill has been performed.

@@ -1,0 +1,168 @@
+name: production-infra
+run-name: Production infrastructure · ${{ inputs.scope || 'changed paths' }}
+
+on:
+  # One ingress; docs-only runs select no mutation jobs. PR CI stays separate.
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Reconcile selected lifecycle; handoff never applies AWS
+        type: choice
+        options: [platform, foundation, governance, github-config, domain, handoff, all]
+        default: platform
+      expected_sha:
+        description: Optional exact revision required by a DNS continuation
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# The certificate entrypoint shares this lock; callees MUST NOT acquire it.
+concurrency:
+  group: terraform-production
+  cancel-in-progress: false
+
+jobs:
+  select:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      foundation: ${{ steps.select.outputs.foundation }}
+      governance: ${{ steps.select.outputs.governance }}
+      github_config: ${{ steps.select.outputs.github_config }}
+      domain: ${{ steps.select.outputs.domain }}
+      platform: ${{ steps.select.outputs.platform }}
+      handoff: ${{ steps.select.outputs.handoff }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Verify production revision
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: bash scripts/assert-current-main.sh
+      - name: Select changed roots or operator-requested scope
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          REQUESTED_SCOPE: ${{ inputs.scope }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == push ]]; then
+            python scripts/plan_production.py --mode push --base "${BASE_SHA}" --head "${HEAD_SHA}"
+          else
+            python scripts/plan_production.py --mode manual --scope "${REQUESTED_SCOPE}"
+          fi
+
+  foundation:
+    needs: select
+    if: needs.select.outputs.foundation == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-foundation.yml
+
+  governance:
+    needs: [select, foundation]
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') && needs.select.result == 'success' &&
+          needs.select.outputs.governance == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-governance.yml
+    with:
+      foundation: ${{ needs.foundation.outputs.context || '{}' }}
+
+  github-config-before:
+    needs: [select, foundation, governance]
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') && needs.select.result == 'success' &&
+          needs.select.outputs.github_config == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-github-config.yml
+    with:
+      foundation: ${{ needs.foundation.outputs.context || '{}' }}
+
+  domain:
+    needs: [select, foundation, governance, github-config-before]
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') && needs.select.result == 'success' &&
+          needs.select.outputs.domain == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-domain.yml
+    with:
+      foundation: ${{ needs.foundation.outputs.context || '{}' }}
+
+  request-certificate:
+    needs: domain
+    if: needs.domain.outputs.delegation_required == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: bash scripts/assert-current-main.sh
+      - name: Create a separate DNS approval run, without waiting here
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run terraform-domain-certificate.yml \
+            --repo "${GITHUB_REPOSITORY}" --ref main \
+            --field expected_sha="${GITHUB_SHA}"
+          echo '## DNS delegation pending' >> "${GITHUB_STEP_SUMMARY}"
+          echo 'Update registrar NS from the domain summary, then approve the certificate run. Platform has NOT been applied by this run.' >> "${GITHUB_STEP_SUMMARY}"
+
+  platform:
+    needs: [select, foundation, governance, github-config-before, domain]
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') && needs.select.result == 'success' &&
+          needs.domain.outputs.delegation_required != 'true' &&
+          (needs.select.outputs.platform == 'true' ||
+           needs.foundation.outputs.apply_role_changed == 'true' ||
+           (needs.domain.result == 'success' &&
+            needs.domain.outputs.previous_platform_signature != needs.domain.outputs.zone_platform_signature)) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-platform.yml
+    with:
+      foundation: ${{ needs.foundation.outputs.context || '{}' }}
+
+  github-config-after:
+    needs: [select, foundation, governance, github-config-before, domain, platform]
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') && needs.select.result == 'success' &&
+          needs.domain.outputs.delegation_required != 'true' &&
+          (needs.platform.result == 'success' || needs.select.outputs.handoff == 'true') }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-github-config.yml
+    with:
+      foundation: ${{ needs.foundation.outputs.context || '{}' }}
+
+  handoff:
+    needs: [foundation, github-config-after]
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') && needs.github-config-after.result == 'success' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-platform-handoff.yml
+    with:
+      foundation: ${{ needs.foundation.outputs.context || '{}' }}

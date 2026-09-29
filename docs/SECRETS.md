@@ -11,7 +11,7 @@
 
 Nếu nhà cung cấp chưa có integration ghi trực tiếp vào Secrets Manager, có thể seed token một lần:
 
-1. Lưu tạm token trong GitHub Environment Secret được giới hạn reviewer/branch.
+1. Lưu tạm token trong GitHub Environment Secret được giới hạn protected branch và owner self-approval.
 2. Workflow dùng AWS OIDC gọi `secretsmanager:PutSecretValue` và tuyệt đối không log giá trị.
 3. Xóa GitHub Secret sau khi seed, hoặc rotate token nếu nó phải tồn tại lâu ở hai nơi.
 4. External Secrets đồng bộ từ Secrets Manager xuống namespace/service account được phép.
@@ -29,9 +29,11 @@ GitHub Environment `prod`, assume AWS role bằng OIDC rồi gọi `secretsmanag
 RDS là trường hợp riêng: `manage_master_user_password=true` khiến RDS tự sinh và lưu password vào
 Secrets Manager ngay trong Terraform apply. Không tạo GitHub Secret và không chạy seed job cho RDS.
 
-Chỉ thêm resource/job seed khi workload thực sự có third-party token. Model promotion là integration
-đầu tiên như vậy: Terraform tạo container không có version, operator seed GitHub App credential sau
-platform apply, và External Secrets không thể materialize Kubernetes Secret trước bước seed.
+Chỉ thêm resource/job seed khi workload thực sự có third-party token. Release automation là
+integration đầu tiên như vậy: Terraform tạo container không có version, operator seed GitHub App
+credential sau platform apply, và External Secrets không thể materialize Kubernetes Secret trước
+bước seed. `reusable-platform-handoff.yml` kiểm tra `AWSCURRENT` bằng `DescribeSecret` và dừng trước GitOps
+dispatch nếu thiếu; check không đọc value. Seed xong rerun failed jobs hoặc dispatch `production-infra.yml` với `scope=handoff`; không apply AWS lại.
 
 ## Argo CD SSO và repository credential
 
@@ -44,33 +46,48 @@ qua `argocd login --core`.
 
 ## GitHub control-plane credentials
 
-Ba App control-plane có identity và blast radius riêng:
+Các App control-plane có identity và blast radius riêng:
 
 - `GOVERNANCE_APP_PRIVATE_KEY`: ruleset của năm repo, Administration write.
 - `CONFIG_SYNC_APP_PRIVATE_KEY`: non-secret variables và app `prod` Environments, install cả năm repo.
-- `GITOPS_APP_PRIVATE_KEY`: chỉ tạo branch/pull request trong `iris-gitops`.
+- `INTENT_PUBLISHER_APP_PRIVATE_KEY`: cùng tên biến nhưng mỗi app Environment giữ key khác nhau:
+  inference chỉ giữ `iris-inference-publisher`, model-registry chỉ giữ
+  `iris-model-registry-publisher`. Cả hai chỉ có Actions write.
+- `PLATFORM_CONTRACT_PUBLISHER_APP_PRIVATE_KEY`: chỉ tồn tại trong
+  `iris-infrastructure/prod`, có Actions write và dispatch riêng platform contract. Receiver kiểm
+  tra exact bot identity trước khi dùng AWS/GitOps credential.
 
 Client ID là metadata không nhạy cảm; private key là root credential dài hạn trong Environment
-secret `prod` và chỉ được release sau approval. Workflow dùng pinned
+secret `prod` và chỉ được dùng trong job đúng Environment/protected branch. Workflow dùng pinned
 `actions/create-github-app-token` để mint installation token có hạn một giờ và scope đúng repo.
 
 Private key/token không được khai báo thành Terraform variable, không được commit vào tfvars và
 không được quản lý bằng `github_actions_*_secret`, vì secret value khi đó có thể đi vào Terraform
-state. Đây là credential control plane GitHub, không phải Kubernetes runtime secret nên không copy
-sang AWS Secrets Manager. Quy trình bootstrap/rotation nằm trong `GITHUB_CONTROL_PLANE.md`.
+state. In-cluster dispatcher dùng App thứ ba `iris-model-release-publisher`, được seed riêng vào
+AWS và không chia sẻ key với application repo. Platform publisher không chạy trong cluster và
+không được seed vào AWS. Quy trình bootstrap/rotation nằm trong `GITHUB_CONTROL_PLANE.md`.
 
-## Model-promotion runtime identity
+## Release automation runtime identities
 
-`iris-model-promoter` là App runtime thứ tư, tách khỏi ba App quản trị control plane. Chỉ Dispatch
-Pod chạy dispatcher image do DevOps sở hữu nhận identity này để phát release intent; training image
-không còn chứa dispatcher code hay nhận key. Workflow nằm trong `iris-gitops` dùng cùng App để tạo
-branch/PR trong chính repo đó. App không có Kubernetes write, AWS administration hoặc quyền
-ruleset. Terraform tạo duy nhất Secrets Manager container
-`<project>-<environment>/github-app/model-promoter` và policy đọc cho External Secrets, nhưng không
-tạo `aws_secretsmanager_secret_version`.
+Hai identity không dùng chung quyền:
 
-Giá trị JSON `{client_id, private_key}` được seed/rotate trực tiếp bằng
-`scripts/seed-model-promoter-secret.sh`. External Secrets materialize thành Secret
-`argo/model-promotion-github-app`. GitOps Actions đọc cùng giá trị bằng OIDC role chỉ có
-`GetSecretValue/DescribeSecret`. Branch protection vẫn yêu cầu GitOps validation và CODEOWNER
-review; reviewer là chủ thể merge production PR.
+- `iris-model-release-publisher`: Actions write only. Chỉ Dispatch Pod chạy image automation của DevOps
+  nhận key qua External Secrets để phát model-release contract. Training image không chứa dispatcher
+  code và không nhận key. Terraform tạo container
+  `<project>-<environment>/github-app/model-release-publisher` và External Secrets chỉ được đọc container
+  này.
+- `iris-gitops-automation`: Contents/Pull requests write chỉ trên `iris-gitops`. Renderer workflow
+  trên trusted `main` assume OIDC role riêng và đọc container
+  `<project>-<environment>/github-app/gitops-automation`; Kubernetes không được đọc container này.
+
+Platform contract không chứa role ARN hoặc secret ARN của `iris-gitops-automation`. Receiver lấy
+hai reference đó từ Terraform-managed repository variables. Vì vậy dispatch payload không thể chọn
+AWS role hay secret khác để lợi dụng receiver như một confused deputy.
+
+Các App đều không có Kubernetes write, AWS administration, ruleset bypass hay quyền merge.
+Terraform không tạo `aws_secretsmanager_secret_version`.
+
+Mỗi giá trị JSON `{client_id, private_key}` được seed/rotate trực tiếp bằng
+`scripts/seed-github-app-secret.sh` với kind `model-release-publisher` hoặc `gitops-automation`. Branch
+protection vẫn yêu cầu GitOps validation; solo operator là chủ thể merge production
+PR.

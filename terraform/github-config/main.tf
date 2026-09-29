@@ -15,38 +15,43 @@ locals {
     ENABLE_PUBLIC_DOMAIN            = tostring(var.enable_public_domain)
     PUBLIC_DOMAIN_NAME              = var.public_domain_name
     ADMIN_ROLE_ARNS_JSON            = jsonencode(var.admin_role_arns)
+    GITOPS_REPOSITORY               = var.gitops_repository
   }
 
   application_environment_variables = var.manage_application_config ? {
     iris-data-pipeline = {
       AWS_REGION              = var.aws_region
-      AWS_DEPLOY_ROLE_ARN     = local.platform.github_actions_role_arn
+      AWS_DEPLOY_ROLE_ARN     = local.platform.github_application_publisher_role_arns.training
       TRAINING_ECR_REPOSITORY = local.platform.ecr_repository_names.training
       DVC_BUCKET              = local.platform.dvc_bucket
     }
     iris-model-registry = {
-      AWS_REGION            = var.aws_region
-      AWS_DEPLOY_ROLE_ARN   = local.platform.github_actions_role_arn
-      MLFLOW_ECR_REPOSITORY = local.platform.ecr_repository_names.mlflow
-      GITOPS_REPOSITORY     = var.gitops_repository
-      GITOPS_APP_CLIENT_ID  = var.gitops_app_client_id
+      AWS_REGION                     = var.aws_region
+      AWS_DEPLOY_ROLE_ARN            = local.platform.github_application_publisher_role_arns.mlflow
+      MLFLOW_ECR_REPOSITORY          = local.platform.ecr_repository_names.mlflow
+      GITOPS_REPOSITORY              = var.gitops_repository
+      INTENT_PUBLISHER_APP_CLIENT_ID = var.model_registry_publisher_app_client_id
     }
     iris-inference-service = {
-      AWS_REGION               = var.aws_region
-      AWS_DEPLOY_ROLE_ARN      = local.platform.github_actions_role_arn
-      INFERENCE_ECR_REPOSITORY = local.platform.ecr_repository_names.inference
-      GITOPS_REPOSITORY        = var.gitops_repository
-      GITOPS_APP_CLIENT_ID     = var.gitops_app_client_id
+      AWS_REGION                     = var.aws_region
+      AWS_DEPLOY_ROLE_ARN            = local.platform.github_application_publisher_role_arns.inference
+      INFERENCE_ECR_REPOSITORY       = local.platform.ecr_repository_names.inference
+      GITOPS_REPOSITORY              = var.gitops_repository
+      INTENT_PUBLISHER_APP_CLIENT_ID = var.inference_publisher_app_client_id
     }
   } : {}
 
   gitops_repository_name = element(split("/", var.gitops_repository), 1)
   gitops_repository_variables = var.manage_application_config ? {
-    AWS_REGION                      = var.aws_region
-    DISPATCHER_ECR_REPOSITORY       = local.platform.ecr_repository_names.dispatcher
-    DISPATCHER_PUBLISH_AWS_ROLE_ARN = local.platform.github_dispatcher_publish_role_arn
-    MODEL_PROMOTION_AWS_ROLE_ARN    = local.platform.github_gitops_promotion_role_arn
-    MODEL_PROMOTION_SECRET_ARN      = local.platform.model_promotion_github_app_secret_arn
+    AWS_REGION                              = var.aws_region
+    RELEASE_AUTOMATION_ECR_REPOSITORY       = local.platform.ecr_repository_names.dispatcher
+    RELEASE_AUTOMATION_PUBLISH_AWS_ROLE_ARN = local.platform.github_release_automation_publish_role_arn
+    GITOPS_AUTOMATION_AWS_ROLE_ARN          = local.platform.github_gitops_automation_role_arn
+    GITOPS_AUTOMATION_SECRET_ARN            = local.platform.gitops_automation_github_app_secret_arn
+    PLATFORM_RECONCILE_ALLOWED_ACTOR        = var.platform_contract_publisher_actor
+    INFERENCE_RELEASE_ALLOWED_ACTOR         = var.inference_publisher_actor
+    MODEL_REGISTRY_RELEASE_ALLOWED_ACTOR    = var.model_registry_publisher_actor
+    MODEL_RELEASE_ALLOWED_ACTOR             = var.model_release_publisher_actor
   } : {}
 
   flattened_application_variables = var.manage_application_config ? merge([
@@ -80,9 +85,21 @@ check "application_environment_coverage" {
   }
 }
 
-data "github_user" "production_reviewer" {
-  for_each = var.manage_application_config ? var.production_reviewer_usernames : toset([])
-  username = each.value
+check "publisher_identities_are_distinct" {
+  assert {
+    condition = !var.manage_application_config || length(toset([
+      var.platform_contract_publisher_actor,
+      var.inference_publisher_actor,
+      var.model_registry_publisher_actor,
+      var.model_release_publisher_actor,
+    ])) == 4
+    error_message = "Platform, inference, model-registry and model-release publisher Apps must use distinct bot identities."
+  }
+}
+
+data "github_user" "deployment_approver" {
+  count    = var.manage_application_config ? 1 : 0
+  username = var.github_owner
 }
 
 # The infrastructure repository's prod Environment is intentionally excluded.
@@ -91,15 +108,14 @@ data "github_user" "production_reviewer" {
 resource "github_repository_environment" "application_prod" {
   for_each = var.manage_application_config ? var.application_repositories : toset([])
 
-  repository          = each.value
-  environment         = var.production_environment
-  can_admins_bypass   = false
-  prevent_self_review = true
+  repository        = each.value
+  environment       = var.production_environment
+  can_admins_bypass = false
+  # Same human may initiate and approve a deployment; PR approvals remain zero.
+  prevent_self_review = false
 
   reviewers {
-    users = [
-      for reviewer in data.github_user.production_reviewer : tonumber(reviewer.id)
-    ]
+    users = [tonumber(data.github_user.deployment_approver[0].id)]
   }
 
   deployment_branch_policy {
@@ -113,7 +129,7 @@ resource "github_repository_environment" "application_prod" {
 }
 
 # Repository scope is used by credential-free PR plans. Environment scope gives
-# the protected apply jobs the same values only after prod approval.
+# the protected-branch apply jobs the same values after owner approval in prod.
 resource "github_actions_variable" "infrastructure" {
   for_each = local.infrastructure_variables
 
@@ -140,7 +156,7 @@ resource "github_actions_environment_variable" "application_prod" {
   value         = each.value.value
 }
 
-resource "github_actions_variable" "gitops_model_promotion" {
+resource "github_actions_variable" "gitops_automation" {
   for_each = local.gitops_repository_variables
 
   repository    = local.gitops_repository_name

@@ -1,0 +1,191 @@
+name: reusable-github-config
+
+on:
+  workflow_call:
+    inputs:
+      foundation:
+        description: Selected non-secret outputs from foundation in this run; empty uses existing configuration
+        type: string
+        default: '{}'
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_state_bucket_name: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+  TF_VAR_state_kms_key_arn: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+  TF_VAR_github_owner: ${{ github.repository_owner }}
+  TF_VAR_enable_public_domain: ${{ vars.ENABLE_PUBLIC_DOMAIN || 'false' }}
+  TF_VAR_public_domain_name: ${{ vars.PUBLIC_DOMAIN_NAME }}
+  TF_VAR_admin_role_arns: ${{ vars.ADMIN_ROLE_ARNS_JSON || '[]' }}
+  TF_VAR_inference_publisher_app_client_id: ${{ vars.INFERENCE_PUBLISHER_APP_CLIENT_ID }}
+  TF_VAR_model_registry_publisher_app_client_id: ${{ vars.MODEL_REGISTRY_PUBLISHER_APP_CLIENT_ID }}
+  TF_VAR_platform_contract_publisher_actor: ${{ vars.PLATFORM_CONTRACT_PUBLISHER_ACTOR }}
+  TF_VAR_inference_publisher_actor: ${{ vars.INFERENCE_PUBLISHER_ACTOR }}
+  TF_VAR_model_registry_publisher_actor: ${{ vars.MODEL_REGISTRY_PUBLISHER_ACTOR }}
+  TF_VAR_model_release_publisher_actor: ${{ vars.MODEL_RELEASE_PUBLISHER_ACTOR }}
+
+jobs:
+  apply-github-config:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: prod
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout trusted main revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Reject stale or non-production execution before credentials
+        run: bash scripts/assert-current-main.sh
+      - name: Validate root-of-trust inputs
+        env:
+          STATE_ROLE_ARN: ${{ fromJSON(inputs.foundation).github_config_apply_role_arn || vars.TF_GITHUB_CONFIG_APPLY_ROLE_ARN }}
+          STATE_BUCKET: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+          STATE_KMS_KEY_ARN: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+          APP_CLIENT_ID: ${{ vars.CONFIG_SYNC_APP_CLIENT_ID }}
+        run: |
+          test -n "${STATE_ROLE_ARN}" || { echo "TF_GITHUB_CONFIG_APPLY_ROLE_ARN is required." >&2; exit 1; }
+          test -n "${STATE_BUCKET}" || { echo "TF_STATE_BUCKET is required." >&2; exit 1; }
+          test -n "${STATE_KMS_KEY_ARN}" || { echo "TF_STATE_KMS_KEY_ARN is required." >&2; exit 1; }
+          test -n "${APP_CLIENT_ID}" || { echo "CONFIG_SYNC_APP_CLIENT_ID is required." >&2; exit 1; }
+          [[ "${STATE_ROLE_ARN}" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+-github-config-apply$ ]] || {
+            echo "The state role must be a dedicated *-github-config-apply role." >&2
+            exit 1
+          }
+
+      - name: Mint short-lived GitHub configuration token
+        id: config-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CONFIG_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            iris-infrastructure
+            iris-data-pipeline
+            iris-model-registry
+            iris-inference-service
+            iris-gitops
+
+      - name: Verify least-privilege GitHub App installation
+        env:
+          GH_TOKEN: ${{ steps.config-token.outputs.token }}
+        run: |
+          gh api installation > "${RUNNER_TEMP}/configuration-installation.json"
+          jq -e '
+            .permissions.administration == "write" and
+            .permissions.environments == "write" and
+            .permissions.variables == "write"
+          ' "${RUNNER_TEMP}/configuration-installation.json" >/dev/null || {
+            echo "Configuration App requires Administration, Environments and Variables write permissions." >&2
+            exit 1
+          }
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.15.6"
+
+      - name: Assume least-privilege GitHub configuration state role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ fromJSON(inputs.foundation).github_config_apply_role_arn || vars.TF_GITHUB_CONFIG_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Detect platform state and validate publisher identities
+        run: |
+          MANAGE_APPLICATION_CONFIG=false
+          state_error="${RUNNER_TEMP}/platform-state-error"
+          if aws s3api head-object \
+            --bucket "${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}" \
+            --key infrastructure/platform.tfstate >/dev/null 2>"${state_error}"; then
+            MANAGE_APPLICATION_CONFIG=true
+            test -n "${TF_VAR_inference_publisher_app_client_id}" || {
+              echo "INFERENCE_PUBLISHER_APP_CLIENT_ID is required after the platform exists." >&2
+              exit 1
+            }
+            test -n "${TF_VAR_model_registry_publisher_app_client_id}" || {
+              echo "MODEL_REGISTRY_PUBLISHER_APP_CLIENT_ID is required after the platform exists." >&2
+              exit 1
+            }
+            test -n "${TF_VAR_platform_contract_publisher_actor}" || {
+              echo "PLATFORM_CONTRACT_PUBLISHER_ACTOR is required after the platform exists." >&2
+              exit 1
+            }
+            for actor_variable in \
+              TF_VAR_inference_publisher_actor \
+              TF_VAR_model_registry_publisher_actor \
+              TF_VAR_model_release_publisher_actor; do
+              test -n "${!actor_variable}" || {
+                echo "${actor_variable#TF_VAR_} is required after the platform exists." >&2
+                exit 1
+              }
+            done
+          elif ! grep -Eq '\(404\)|\(NoSuchKey\)|\(NotFound\)' "${state_error}"; then
+            echo "Cannot determine platform state; refusing to treat an AWS error as absence." >&2
+            exit 1
+          fi
+          echo "TF_VAR_manage_application_config=${MANAGE_APPLICATION_CONFIG}" >> "${GITHUB_ENV}"
+
+      - name: Initialize GitHub configuration state
+        working-directory: terraform/github-config
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}"
+
+      - name: Create authoritative configuration plan
+        working-directory: terraform/github-config
+        env:
+          GITHUB_TOKEN: ${{ steps.config-token.outputs.token }}
+          TF_VAR_discover_existing_configuration: "true"
+        run: terraform plan -out=tfplan
+
+      - name: Reject production Environment deletion/replacement
+        working-directory: terraform/github-config
+        run: |
+          terraform show -json tfplan > "${RUNNER_TEMP}/github-config-plan.json"
+          if jq -e '
+            any(
+              .resource_changes[]?;
+              .type == "github_repository_environment" and
+              (.change.actions | index("delete")) != null
+            )
+          ' "${RUNNER_TEMP}/github-config-plan.json" >/dev/null; then
+            echo "Deleting or replacing a protected prod Environment is blocked." >&2
+            exit 1
+          fi
+
+      - name: Apply saved configuration plan
+        working-directory: terraform/github-config
+        env:
+          GITHUB_TOKEN: ${{ steps.config-token.outputs.token }}
+          TF_VAR_discover_existing_configuration: "true"
+        run: |
+          bash ../../scripts/assert-current-main.sh
+          terraform apply -auto-approve tfplan
+
+      - name: Publish managed configuration
+        working-directory: terraform/github-config
+        env:
+          SOURCE: ${{ github.event_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## GitHub configuration reconciled"
+            echo
+            echo "- Requested by: ${SOURCE}"
+            echo "- Initiating commit: \`${SOURCE_SHA}\`"
+            echo "- Applied commit: \`${GITHUB_SHA}\`"
+            echo "- Application configuration enabled: ${TF_VAR_manage_application_config}"
+            echo
+            echo '```json'
+            terraform output -json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

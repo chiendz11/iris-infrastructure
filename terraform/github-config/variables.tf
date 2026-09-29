@@ -47,29 +47,16 @@ variable "production_environment" {
   default     = "prod"
 }
 
-variable "production_reviewer_usernames" {
-  description = "Independent GitHub collaborators allowed to approve application production deployments."
-  type        = set(string)
-  default     = []
-
-  validation {
-    condition = !var.manage_application_config || (
-      length(var.production_reviewer_usernames) > 0 &&
-      length(var.production_reviewer_usernames) <= 6 &&
-      alltrue([
-        for username in var.production_reviewer_usernames :
-        can(regex("^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$", username)) &&
-        lower(trimspace(username)) != lower(var.github_owner)
-      ])
-    )
-    error_message = "When manage_application_config=true, provide at least one reviewer other than github_owner."
-  }
-}
-
 variable "manage_application_config" {
   description = "Read platform state and manage app-repository environments/variables after platform exists."
   type        = bool
   default     = false
+}
+
+variable "discover_existing_configuration" {
+  description = "Discover/adopt existing owned configuration during trusted apply. Disable only for credential-free speculative PR plans."
+  type        = bool
+  default     = true
 }
 
 variable "enable_public_domain" {
@@ -96,18 +83,85 @@ variable "admin_role_arns" {
 }
 
 variable "gitops_repository" {
-  description = "Full repository name receiving immutable image and infrastructure-output pull requests."
+  description = "Full repository name receiving versioned release and platform contracts."
   type        = string
   default     = "chiendz11/iris-gitops"
 }
 
-variable "gitops_app_client_id" {
-  description = "Non-secret client ID of the least-privilege GitOps pull-request GitHub App."
+variable "inference_publisher_app_client_id" {
+  description = "Client ID of the Actions-only App dedicated to iris-inference-service."
   type        = string
   default     = ""
 
   validation {
-    condition     = !var.manage_application_config || trimspace(var.gitops_app_client_id) != ""
-    error_message = "gitops_app_client_id is required when application configuration is enabled."
+    condition     = !var.manage_application_config || trimspace(var.inference_publisher_app_client_id) != ""
+    error_message = "inference_publisher_app_client_id is required when application configuration is enabled."
+  }
+}
+
+variable "model_registry_publisher_app_client_id" {
+  description = "Client ID of the Actions-only App dedicated to iris-model-registry."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.manage_application_config || trimspace(var.model_registry_publisher_app_client_id) != ""
+    error_message = "model_registry_publisher_app_client_id is required when application configuration is enabled."
+  }
+}
+
+variable "platform_contract_publisher_actor" {
+  description = "Exact GitHub App bot login allowed to dispatch platform contracts (for example iris-platform-contract-publisher[bot])."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = !var.manage_application_config || can(regex(
+      "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?\\[bot\\]$",
+      var.platform_contract_publisher_actor,
+    ))
+    error_message = "platform_contract_publisher_actor must be an exact GitHub App bot login ending in [bot]."
+  }
+}
+
+variable "inference_publisher_actor" {
+  description = "Exact GitHub App bot login allowed to publish inference workload intents."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = !var.manage_application_config || can(regex(
+      "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?\\[bot\\]$",
+      var.inference_publisher_actor,
+    ))
+    error_message = "inference_publisher_actor must be an exact GitHub App bot login ending in [bot]."
+  }
+}
+
+variable "model_registry_publisher_actor" {
+  description = "Exact GitHub App bot login allowed to publish model-registry workload intents."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = !var.manage_application_config || can(regex(
+      "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?\\[bot\\]$",
+      var.model_registry_publisher_actor,
+    ))
+    error_message = "model_registry_publisher_actor must be an exact GitHub App bot login ending in [bot]."
+  }
+}
+
+variable "model_release_publisher_actor" {
+  description = "Exact GitHub App bot login allowed to publish in-cluster model lifecycle intents."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = !var.manage_application_config || can(regex(
+      "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?\\[bot\\]$",
+      var.model_release_publisher_actor,
+    ))
+    error_message = "model_release_publisher_actor must be an exact GitHub App bot login ending in [bot]."
   }
 }

@@ -5,8 +5,11 @@ az_count                       = 2
 enable_nat_gateway             = true
 single_nat_gateway             = true
 enable_interface_vpc_endpoints = false
-kubernetes_version             = "1.33"
-node_instance_types            = ["t3.medium"]
+kubernetes_version             = "1.34"
+# Day-0 uses AWS's default compatible build. Pin the resolved output in a
+# reviewed PR before subsequent upgrades.
+ebs_csi_addon_version = null
+node_instance_types   = ["t3.medium"]
 # Redis HA in the production Argo CD profile requires three schedulable nodes.
 node_min_size     = 3
 node_desired_size = 3

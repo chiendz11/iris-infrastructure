@@ -38,39 +38,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          foundation=false
-          governance=false
-          github_config=false
-          domain=false
-          platform=false
-
-          while IFS= read -r file; do
-            case "${file}" in
-              terraform/bootstrap/*) foundation=true ;;
-              terraform/github-governance/*) governance=true ;;
-              terraform/github-config/*|.github/workflows/terraform-github-config.yml) github_config=true ;;
-              terraform/domain/*|scripts/detect-domain-delegation.sh) domain=true ;;
-              terraform/platform/*|environments/production.tfvars|scripts/sync_gitops_outputs.py) platform=true ;;
-            esac
-          done < <(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")
-
-          {
-            echo "foundation=${foundation}"
-            echo "governance=${governance}"
-            echo "github_config=${github_config}"
-            echo "domain=${domain}"
-            echo "platform=${platform}"
-          } >> "${GITHUB_OUTPUT}"
-
-          {
-            echo "## Terraform roots changed"
-            echo
-            echo "- foundation (terraform/bootstrap): ${foundation}"
-            echo "- GitHub governance: ${governance}"
-            echo "- GitHub configuration: ${github_config}"
-            echo "- domain: ${domain}"
-            echo "- platform: ${platform}"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          python scripts/plan_production.py --base "${BASE_SHA}" --head "${HEAD_SHA}" --mode pr
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.15.6"
@@ -91,6 +59,20 @@ jobs:
           "${RUNNER_TEMP}/actionlint" .github/workflows/*.yml
       - name: Validate shell automation
         run: bash -n scripts/*.sh
+      - name: Test GitHub configuration adoption with mocked providers only
+        working-directory: terraform/github-config
+        run: |
+          terraform init -backend=false
+          terraform test -filter=tests/adoption.tftest.hcl
+      - name: Test ruleset create/adopt guards with mocked providers only
+        working-directory: terraform/github-governance
+        run: |
+          terraform init -backend=false
+          terraform test -filter=tests/adoption.tftest.hcl
+      - name: Validate platform contract producer and solo automation
+        run: |
+          python -m pip install --requirement requirements-ci.txt
+          python -m unittest discover --start-directory tests --verbose
       - name: Check Terraform formatting
         run: terraform fmt -check -recursive
       - name: Render Terraform-owned Argo CD release
@@ -212,13 +194,15 @@ jobs:
         working-directory: terraform/github-governance
         env:
           TF_VAR_github_owner: ${{ github.repository_owner }}
+          TF_VAR_discover_existing_rulesets: "false"
         run: |
           terraform init \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="region=${AWS_REGION}" \
             -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
-          # These repositories are public, so existing rulesets can be read without
-          # exposing an Administration token to pull-request-controlled code.
+          # Speculative state-only plan: no live discovery/import and no App key
+          # in PR-controlled code. The protected job refreshes and adopts first.
+          echo "Ruleset existence/import is verified after merge in the protected governance job." >> "${GITHUB_STEP_SUMMARY}"
           env -u GITHUB_TOKEN -u GH_TOKEN terraform plan -refresh=false -no-color
 
   plan-github-config:
@@ -268,9 +252,15 @@ jobs:
         working-directory: terraform/github-config
         env:
           TF_VAR_github_owner: ${{ github.repository_owner }}
-          TF_VAR_gitops_app_client_id: ${{ vars.GITOPS_APP_CLIENT_ID }}
+          TF_VAR_inference_publisher_app_client_id: ${{ vars.INFERENCE_PUBLISHER_APP_CLIENT_ID }}
+          TF_VAR_model_registry_publisher_app_client_id: ${{ vars.MODEL_REGISTRY_PUBLISHER_APP_CLIENT_ID }}
+          TF_VAR_platform_contract_publisher_actor: ${{ vars.PLATFORM_CONTRACT_PUBLISHER_ACTOR }}
+          TF_VAR_inference_publisher_actor: ${{ vars.INFERENCE_PUBLISHER_ACTOR }}
+          TF_VAR_model_registry_publisher_actor: ${{ vars.MODEL_REGISTRY_PUBLISHER_ACTOR }}
+          TF_VAR_model_release_publisher_actor: ${{ vars.MODEL_RELEASE_PUBLISHER_ACTOR }}
           TF_VAR_manage_application_config: ${{ steps.state.outputs.platform_state_exists }}
-          TF_VAR_production_reviewer_usernames: ${{ vars.PRODUCTION_REVIEWER_USERNAMES_JSON || '[]' }}
+          # No live discovery or privileged App credential in PRs.
+          TF_VAR_discover_existing_configuration: "false"
         run: |
           terraform init \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \

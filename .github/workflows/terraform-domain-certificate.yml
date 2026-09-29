@@ -1,0 +1,53 @@
+name: terraform-domain-certificate
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact main revision from the zone run; empty for reviewed manual recovery
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Same outer lock as production-infra, never nested inside reusable jobs.
+concurrency:
+  group: terraform-production
+  cancel-in-progress: false
+
+jobs:
+  verify-revision:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Verify the zone handoff revision
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: bash scripts/assert-current-main.sh
+
+  certificate:
+    needs: verify-revision
+    permissions:
+      contents: read
+      id-token: write
+    # The called job uses existing prod and owner approval, in this distinct run.
+    uses: ./.github/workflows/reusable-certificate.yml
+
+  continue-platform:
+    needs: certificate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: bash scripts/assert-current-main.sh
+      - name: Continue orchestration at platform, not foundation or DNS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run production-infra.yml \
+            --repo "${GITHUB_REPOSITORY}" --ref main \
+            --field scope=platform --field expected_sha="${GITHUB_SHA}"

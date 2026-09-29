@@ -41,5 +41,5 @@ resource "helm_release" "argocd" {
 
   # The EKS module includes the managed node group and the explicit Access
   # Entry that authorizes the protected Terraform apply role.
-  depends_on = [module.eks]
+  depends_on = [module.eks, aws_eks_addon.ebs_csi]
 }

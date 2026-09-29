@@ -9,3 +9,8 @@ terraform.tfvars
 .env
 __pycache__/
 *.py[cod]
+# Local private keys and credential bundles
+*.pem
+*.key
+*.p12
+*.pfx
