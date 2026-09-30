@@ -59,6 +59,11 @@ jobs:
           "${RUNNER_TEMP}/actionlint" .github/workflows/*.yml
       - name: Validate shell automation
         run: bash -n scripts/*.sh
+      - name: Test foundation OIDC trust with mocked AWS only
+        working-directory: terraform/bootstrap
+        run: |
+          terraform init -backend=false
+          terraform test -filter=tests/oidc.tftest.hcl
       - name: Test GitHub configuration adoption with mocked providers only
         working-directory: terraform/github-config
         run: |

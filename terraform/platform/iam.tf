@@ -141,9 +141,9 @@ data "aws_iam_policy_document" "github_application_trust" {
     }
 
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${each.value}:environment:prod"]
+      values   = ["${var.github_oidc_subject_prefixes[each.value]}:environment:prod"]
     }
   }
 }
@@ -218,7 +218,7 @@ data "aws_iam_policy_document" "github_gitops_automation_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.gitops_repository}:ref:refs/heads/main"]
+      values   = ["${var.github_oidc_subject_prefixes[var.gitops_repository]}:ref:refs/heads/main"]
     }
   }
 }
@@ -279,7 +279,7 @@ data "aws_iam_policy_document" "github_release_automation_publish_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.gitops_repository}:ref:refs/heads/main"]
+      values   = ["${var.github_oidc_subject_prefixes[var.gitops_repository]}:ref:refs/heads/main"]
     }
   }
 }

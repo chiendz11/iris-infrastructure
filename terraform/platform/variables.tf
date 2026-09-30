@@ -174,6 +174,28 @@ variable "github_repositories" {
   }
 }
 
+variable "github_oidc_subject_prefixes" {
+  description = "Exact GitHub OIDC sub_claim_prefix per repository, verified with the repository OIDC API. Non-secret identity configuration, not credentials."
+  type        = map(string)
+  default = {
+    "chiendz11/iris-data-pipeline"     = "repo:chiendz11@169627609/iris-data-pipeline@1340834360"
+    "chiendz11/iris-model-registry"    = "repo:chiendz11@169627609/iris-model-registry@1340834550"
+    "chiendz11/iris-inference-service" = "repo:chiendz11@169627609/iris-inference-service@1340834663"
+    "chiendz11/iris-gitops"            = "repo:chiendz11@169627609/iris-gitops@1342006443"
+  }
+
+  validation {
+    condition = alltrue([
+      for repository in concat(values(var.github_repositories), [var.gitops_repository]) : try(
+        can(regex("^repo:[A-Za-z0-9_.-]+(@[0-9]+)?/[A-Za-z0-9_.-]+(@[0-9]+)?$", var.github_oidc_subject_prefixes[repository])) &&
+        replace(var.github_oidc_subject_prefixes[repository], "/@[0-9]+/", "") == "repo:${repository}",
+        false
+      )
+    ])
+    error_message = "Every application and GitOps repository needs its matching exact OIDC subject prefix, without wildcards or context suffixes."
+  }
+}
+
 variable "gitops_repository" {
   description = "GitOps repository whose trusted main workflows may read the GitOps automation credential through OIDC."
   type        = string

@@ -33,6 +33,10 @@ thuộc `iris-gitops`; AWS Load Balancer Controller tạo NLB và ExternalDNS t�
 
 ## Bootstrap duy nhất chạy local
 
+Nếu PR thất bại với `Not authorized to perform sts:AssumeRoleWithWebIdentity`,
+đối chiếu subject có immutable ID với IAM trust theo [OIDC_RECOVERY.md](docs/OIDC_RECOVERY.md).
+Không mở wildcard hoặc tắt required check để bỏ qua lỗi xác thực.
+
 Lần đầu chưa có OIDC role cho CI, dùng AWS admin profile để tạo state và automation roles:
 
 ```bash
