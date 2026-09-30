@@ -128,7 +128,7 @@ jobs:
               echo "## Platform handoff is blocked"
               echo
               echo "Terraform created the secret containers, but these credentials have no AWSCURRENT version:"
-              printf -- '- `%s`\n' "${missing[@]}"
+              printf -- '- %s\n' "${missing[@]}"
               echo
               echo "Seed them with \`scripts/seed-github-app-secret.sh\`, then rerun failed jobs or dispatch production-infra.yml with scope=handoff."
               echo "No secret value was read or printed by this check."
