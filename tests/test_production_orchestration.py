@@ -200,11 +200,29 @@ class WorkflowBoundaryTest(unittest.TestCase):
     def test_no_double_ingress_and_same_revision_reuse(self):
         push_workflows = [path.name for path in WORKFLOWS.glob("*.yml") if "push" in workflow(path.name)["on"]]
         self.assertEqual(push_workflows, ["production-infra.yml"])
-        for job in workflow("production-infra.yml")["jobs"].values():
+        production_jobs = workflow("production-infra.yml")["jobs"]
+        secret_consumers = {
+            "governance", "github-config-before", "github-config-after", "handoff",
+        }
+        for name, job in production_jobs.items():
             if "uses" in job:
                 self.assertTrue(job["uses"].startswith("./.github/workflows/reusable-"))
                 self.assertNotIn("@main", job["uses"])
-                self.assertNotIn("secrets", job)  # job-scoped prod secrets, no blanket inherit
+                if name in secret_consumers:
+                    # Work around actions/runner#4453 for the trusted local
+                    # reusables that read GitHub App keys from environment prod.
+                    self.assertEqual(job.get("secrets"), "inherit")
+                else:
+                    # Do not widen secret exposure for jobs that only need OIDC.
+                    self.assertNotIn("secrets", job)
+
+        self.assertEqual(
+            {
+                name for name, job in production_jobs.items()
+                if job.get("secrets") == "inherit"
+            },
+            secret_consumers,
+        )
 
 
 class RevisionGuardTest(unittest.TestCase):
