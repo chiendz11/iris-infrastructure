@@ -19,20 +19,57 @@ if ! command -v dig >/dev/null 2>&1; then
   exit 1
 fi
 
-CURRENT_DOMAIN="$(terraform output -raw domain_name 2>/dev/null || true)"
-CURRENT_READY="$(terraform output -raw domain_ready 2>/dev/null || echo false)"
+# Read the JSON object once. A missing named output can print a human-readable
+# warning to stdout; appending [] does not make that stream valid JSON.
+# Empty state is normal on first deploy, but backend/authentication failures are not.
+if ! OUTPUTS="$(terraform output -json)"; then
+  echo "Cannot read domain outputs; refusing to assume an undeployed domain." >&2
+  exit 1
+fi
+if ! jq -e '
+  type == "object" and
+  (.domain_name.value == null or (.domain_name.value | type == "string")) and
+  (.domain_ready.value == null or (.domain_ready.value | type == "boolean")) and
+  (.route53_name_servers.value == null or (.route53_name_servers.value |
+    type == "array" and all(.[]; type == "string" and length > 0)))
+' <<<"${OUTPUTS}" >/dev/null; then
+  echo "Domain outputs have an invalid JSON shape; refusing to guess DNS phase." >&2
+  exit 1
+fi
+CURRENT_DOMAIN="$(jq -r '.domain_name.value // ""' <<<"${OUTPUTS}")"
+CURRENT_DOMAIN="${CURRENT_DOMAIN%.}"
+CURRENT_DOMAIN="${CURRENT_DOMAIN,,}"
+DESIRED_DOMAIN="${DESIRED_DOMAIN%.}"
+DESIRED_DOMAIN="${DESIRED_DOMAIN,,}"
+CURRENT_READY="$(jq -r '.domain_ready.value // false' <<<"${OUTPUTS}")"
+EXPECTED="$(jq -r '(.route53_name_servers.value // [])[]' <<<"${OUTPUTS}" |
+  tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sort -u)"
+
+if ! STATE_RESOURCES="$(terraform state list -no-color 2>&1)"; then
+  # Only this explicit absent-state diagnostic is safe during initial bootstrap.
+  if [[ "$(jq 'length' <<<"${OUTPUTS}")" == 0 &&
+        "${STATE_RESOURCES}" == *'No state file was found!'* ]]; then
+    STATE_RESOURCES=""
+  else
+    printf '%s\n' "${STATE_RESOURCES}" >&2
+    echo "Cannot inspect domain resources; refusing to guess certificate state." >&2
+    exit 1
+  fi
+fi
 CERTIFICATE_STATE_PRESENT=false
-if terraform state list 2>/dev/null | grep -Eq \
-  '^aws_(acm_certificate|acm_certificate_validation|route53_record)\.(public|certificate_validation)'; then
+if grep -Eq \
+  '^aws_(acm_certificate|acm_certificate_validation|route53_record)\.(public|certificate_validation)' \
+  <<<"${STATE_RESOURCES}"; then
   CERTIFICATE_STATE_PRESENT=true
 fi
-EXPECTED="$({
-  terraform output -json route53_name_servers 2>/dev/null || echo '[]'
-} | jq -r '.[]' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sort -u)"
 
 # No existing zone (or a first apply for a new name) means phase one must only
 # create the hosted zone. The registrar cannot be delegated before this.
 if [[ "${CURRENT_DOMAIN}" != "${DESIRED_DOMAIN}" || -z "${EXPECTED}" ]]; then
+  if [[ "${CURRENT_READY}" == true || "${CERTIFICATE_STATE_PRESENT}" == true ]]; then
+    echo "Existing certificate state has missing or mismatched domain outputs; refusing domain_delegated=false." >&2
+    exit 1
+  fi
   echo false
   exit 0
 fi
