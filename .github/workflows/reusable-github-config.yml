@@ -73,19 +73,41 @@ jobs:
             iris-inference-service
             iris-gitops
 
-      - name: Verify least-privilege GitHub App installation
+      - name: Verify configuration App repository scope and read capabilities
         env:
           GH_TOKEN: ${{ steps.config-token.outputs.token }}
+          APP_OWNER: ${{ github.repository_owner }}
         run: |
-          gh api installation > "${RUNNER_TEMP}/configuration-installation.json"
-          jq -e '
-            .permissions.administration == "write" and
-            .permissions.environments == "write" and
-            .permissions.variables == "write"
-          ' "${RUNNER_TEMP}/configuration-installation.json" >/dev/null || {
-            echo "Configuration App requires Administration, Environments and Variables write permissions." >&2
+          expected_repositories="$(
+            printf '%s\n' \
+              "${APP_OWNER}/iris-data-pipeline" \
+              "${APP_OWNER}/iris-gitops" \
+              "${APP_OWNER}/iris-inference-service" \
+              "${APP_OWNER}/iris-infrastructure" \
+              "${APP_OWNER}/iris-model-registry" | sort
+          )"
+          actual_repositories="$(
+            gh api --paginate "installation/repositories?per_page=100" \
+              --jq '.repositories[].full_name' | sort
+          )"
+          if [[ "${actual_repositories}" != "${expected_repositories}" ]]; then
+            echo "Configuration App token repository scope does not match the five Iris repositories." >&2
+            diff \
+              <(printf '%s\n' "${expected_repositories}") \
+              <(printf '%s\n' "${actual_repositories}") >&2 || true
             exit 1
-          }
+          fi
+
+          while IFS= read -r repository; do
+            gh api "repos/${repository}/actions/variables?per_page=1" >/dev/null || {
+              echo "Configuration App cannot read Actions Variables for ${repository}." >&2
+              exit 1
+            }
+            gh api "repos/${repository}/environments?per_page=1" >/dev/null || {
+              echo "Configuration App cannot read Environments for ${repository}." >&2
+              exit 1
+            }
+          done <<<"${expected_repositories}"
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
