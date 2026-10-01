@@ -273,6 +273,64 @@ if [ "$4" = domain_ready ]; then echo "$TEST_READY"; else echo "$TEST_DOMAIN"; f
 
 
 class ConfigDiscoveryTest(unittest.TestCase):
+    def test_configuration_app_preflight_uses_installation_token_endpoints(self):
+        job = workflow("reusable-github-config.yml")["jobs"]["apply-github-config"]
+        step = next(
+            step for step in job["steps"]
+            if step.get("name") == "Verify configuration App repository scope and read capabilities"
+        )
+        code = step["run"]
+        self.assertIn("installation/repositories?per_page=100", code)
+        self.assertNotIn("gh api installation >", code)
+        self.assertIn("/actions/variables?per_page=1", code)
+        self.assertIn("/environments?per_page=1", code)
+
+        with tempfile.TemporaryDirectory() as directory:
+            mock = Path(directory) / "gh"
+            mock.write_text('''#!/bin/sh
+case " $* " in
+  *" installation/repositories?per_page=100 "*)
+    printf '%s\\n' "$TEST_REPOSITORIES"
+    ;;
+  *)
+    exit "${TEST_READ_EXIT:-0}"
+    ;;
+esac
+''')
+            mock.chmod(0o755)
+            owner = "chiendz11"
+            repositories = "\n".join(sorted([
+                f"{owner}/iris-data-pipeline", f"{owner}/iris-gitops",
+                f"{owner}/iris-inference-service", f"{owner}/iris-infrastructure",
+                f"{owner}/iris-model-registry",
+            ]))
+            env = dict(
+                os.environ,
+                PATH=f"{directory}:{os.defpath}", APP_OWNER=owner,
+                TEST_REPOSITORIES=repositories,
+            )
+            result = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", code], env=env,
+                text=True, capture_output=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            missing = env | {"TEST_REPOSITORIES": "\n".join(repositories.splitlines()[:-1])}
+            result = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", code], env=missing,
+                text=True, capture_output=True, timeout=5,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("repository scope does not match", result.stderr)
+
+            denied = env | {"TEST_READ_EXIT": "1"}
+            result = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", code], env=denied,
+                text=True, capture_output=True, timeout=5,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot read Actions Variables", result.stderr)
+
     def test_only_not_found_means_no_platform_state(self):
         job = workflow("reusable-github-config.yml")["jobs"]["apply-github-config"]
         code = next(step["run"] for step in job["steps"]
