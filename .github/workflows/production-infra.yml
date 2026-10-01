@@ -75,6 +75,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/reusable-governance.yml
+    # GitHub runner issue #4453: environment-scoped secrets in a called
+    # workflow currently resolve empty unless the local caller inherits them.
+    secrets: inherit
     with:
       foundation: ${{ needs.foundation.outputs.context || '{}' }}
 
@@ -88,6 +91,7 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/reusable-github-config.yml
+    secrets: inherit
     with:
       foundation: ${{ needs.foundation.outputs.context || '{}' }}
 
@@ -152,6 +156,7 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/reusable-github-config.yml
+    secrets: inherit
     with:
       foundation: ${{ needs.foundation.outputs.context || '{}' }}
 
@@ -164,5 +169,6 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/reusable-platform-handoff.yml
+    secrets: inherit
     with:
       foundation: ${{ needs.foundation.outputs.context || '{}' }}
