@@ -1,0 +1,9 @@
+{
+  "name": "iris-model-registry-publisher",
+  "url": "https://github.com/chiendz11/iris-model-registry",
+  "public": false,
+  "default_events": [],
+  "default_permissions": {
+    "actions": "write"
+  }
+}

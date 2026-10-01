@@ -89,7 +89,7 @@ data "aws_iam_policy_document" "terraform_plan_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:terraform-plan"]
+      values   = ["${var.github_oidc_subject_prefix}:pull_request"]
     }
   }
 }
@@ -112,7 +112,7 @@ data "aws_iam_policy_document" "terraform_apply_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:production"]
+      values   = ["${var.github_oidc_subject_prefix}:environment:${var.github_environment}"]
     }
   }
 }
@@ -125,6 +125,10 @@ resource "aws_iam_role" "terraform_plan" {
 resource "aws_iam_role" "terraform_apply" {
   name               = "${var.project_name}-terraform-apply"
   assume_role_policy = data.aws_iam_policy_document.terraform_apply_trust.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "terraform_plan_read_only" {
@@ -166,10 +170,249 @@ resource "aws_iam_policy" "terraform_state_access" {
 
 resource "aws_iam_role_policy_attachment" "terraform_state_access" {
   for_each = {
-    plan  = aws_iam_role.terraform_plan.name
     apply = aws_iam_role.terraform_apply.name
   }
 
   role       = each.value
   policy_arn = aws_iam_policy.terraform_state_access.arn
+}
+
+data "aws_iam_policy_document" "terraform_state_plan_access" {
+  statement {
+    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+  }
+
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.terraform_state.arn}/infrastructure/*"]
+  }
+
+  # Terraform plan uses S3 lockfiles but must not overwrite a state object.
+  statement {
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.terraform_state.arn}/infrastructure/*.tflock"]
+  }
+
+  statement {
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey"
+    ]
+    resources = [aws_kms_key.terraform_state.arn]
+  }
+}
+
+resource "aws_iam_policy" "terraform_state_plan_access" {
+  name   = "${var.project_name}-terraform-state-plan-access"
+  policy = data.aws_iam_policy_document.terraform_state_plan_access.json
+}
+
+resource "aws_iam_role_policy_attachment" "terraform_state_plan_access" {
+  role       = aws_iam_role.terraform_plan.name
+  policy_arn = aws_iam_policy.terraform_state_plan_access.arn
+}
+
+# GitHub governance uses dedicated AWS roles only to access its own Terraform
+# backend object. The role that mutates GitHub never receives AWS AdministratorAccess.
+resource "aws_iam_role" "github_governance_plan" {
+  name               = "${var.project_name}-github-governance-plan"
+  assume_role_policy = data.aws_iam_policy_document.terraform_plan_trust.json
+}
+
+resource "aws_iam_role" "github_governance_apply" {
+  name               = "${var.project_name}-github-governance-apply"
+  assume_role_policy = data.aws_iam_policy_document.terraform_apply_trust.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+data "aws_iam_policy_document" "github_governance_plan_state" {
+  statement {
+    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+  }
+
+  statement {
+    actions = ["s3:GetObject"]
+    resources = [
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-governance.tfstate"
+    ]
+  }
+
+  statement {
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-governance.tfstate.tflock"
+    ]
+  }
+
+  statement {
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey"
+    ]
+    resources = [aws_kms_key.terraform_state.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_governance_plan_state" {
+  name   = "github-governance-state-read"
+  role   = aws_iam_role.github_governance_plan.id
+  policy = data.aws_iam_policy_document.github_governance_plan_state.json
+}
+
+data "aws_iam_policy_document" "github_governance_apply_state" {
+  statement {
+    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+  }
+
+  statement {
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-governance.tfstate",
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-governance.tfstate.tflock"
+    ]
+  }
+
+  statement {
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey"
+    ]
+    resources = [aws_kms_key.terraform_state.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_governance_apply_state" {
+  name   = "github-governance-state-write"
+  role   = aws_iam_role.github_governance_apply.id
+  policy = data.aws_iam_policy_document.github_governance_apply_state.json
+}
+
+# GitHub repository/environment configuration has its own state-only AWS roles.
+# GitHub mutation is authorized separately by a short-lived GitHub App token;
+# neither role below can administer AWS platform resources.
+resource "aws_iam_role" "github_config_plan" {
+  name               = "${var.project_name}-github-config-plan"
+  assume_role_policy = data.aws_iam_policy_document.terraform_plan_trust.json
+}
+
+resource "aws_iam_role" "github_config_apply" {
+  name               = "${var.project_name}-github-config-apply"
+  assume_role_policy = data.aws_iam_policy_document.terraform_apply_trust.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+data "aws_iam_policy_document" "github_config_plan_state" {
+  statement {
+    actions   = ["s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+  }
+
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["infrastructure/*"]
+    }
+  }
+
+  statement {
+    actions = ["s3:GetObject"]
+    resources = [
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/bootstrap.tfstate",
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/platform.tfstate",
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-config.tfstate",
+    ]
+  }
+
+  # S3 native lockfiles are mutable even for speculative Terraform plans.
+  statement {
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-config.tfstate.tflock",
+    ]
+  }
+
+  statement {
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey",
+    ]
+    resources = [aws_kms_key.terraform_state.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_config_plan_state" {
+  name   = "github-config-state-read"
+  role   = aws_iam_role.github_config_plan.id
+  policy = data.aws_iam_policy_document.github_config_plan_state.json
+}
+
+data "aws_iam_policy_document" "github_config_apply_state" {
+  statement {
+    actions   = ["s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+  }
+
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["infrastructure/*"]
+    }
+  }
+
+  statement {
+    actions = ["s3:GetObject"]
+    resources = [
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/bootstrap.tfstate",
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/platform.tfstate",
+    ]
+  }
+
+  statement {
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-config.tfstate",
+      "${aws_s3_bucket.terraform_state.arn}/infrastructure/github-config.tfstate.tflock",
+    ]
+  }
+
+  statement {
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey",
+    ]
+    resources = [aws_kms_key.terraform_state.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_config_apply_state" {
+  name   = "github-config-state-write"
+  role   = aws_iam_role.github_config_apply.id
+  policy = data.aws_iam_policy_document.github_config_apply_state.json
 }

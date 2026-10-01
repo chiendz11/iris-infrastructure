@@ -1,0 +1,9 @@
+# Copy this file to backend.tf only after the first local bootstrap apply.
+# backend.tf is git-ignored; CI materializes it before initializing remote state.
+terraform {
+  backend "s3" {
+    key          = "infrastructure/bootstrap.tfstate"
+    use_lockfile = true
+    encrypt      = true
+  }
+}

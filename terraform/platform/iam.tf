@@ -74,8 +74,14 @@ data "aws_iam_policy_document" "argo_events" {
 
 data "aws_iam_policy_document" "external_secrets" {
   statement {
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_db_instance.mlflow.master_user_secret[0].secret_arn]
+    actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = concat(
+      [
+        aws_db_instance.mlflow.master_user_secret[0].secret_arn,
+        aws_secretsmanager_secret.model_release_publisher_github_app.arn,
+      ],
+      var.additional_external_secret_arns
+    )
   }
 }
 
@@ -84,7 +90,7 @@ data "aws_iam_policy_document" "external_dns" {
 
   statement {
     actions   = ["route53:ChangeResourceRecordSets"]
-    resources = var.route53_zone_id == null ? [] : ["arn:aws:route53:::hostedzone/${var.route53_zone_id}"]
+    resources = local.route53_zone_id == null ? [] : ["arn:aws:route53:::hostedzone/${local.route53_zone_id}"]
   }
 
   statement {
@@ -117,7 +123,9 @@ resource "aws_iam_role_policy_attachment" "service_account" {
   policy_arn = each.value.arn
 }
 
-data "aws_iam_policy_document" "github_trust" {
+data "aws_iam_policy_document" "github_application_trust" {
+  for_each = var.github_repositories
+
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -133,19 +141,22 @@ data "aws_iam_policy_document" "github_trust" {
     }
 
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [for repository in var.github_repositories : "repo:${repository}:*"]
+      values   = ["${var.github_oidc_subject_prefixes[each.value]}:environment:prod"]
     }
   }
 }
 
-resource "aws_iam_role" "github_actions" {
-  name               = "${local.name}-github-actions"
-  assume_role_policy = data.aws_iam_policy_document.github_trust.json
+resource "aws_iam_role" "github_application_publisher" {
+  for_each           = var.github_repositories
+  name               = "${local.name}-github-${replace(each.key, "_", "-")}-publisher"
+  assume_role_policy = data.aws_iam_policy_document.github_application_trust[each.key].json
 }
 
-data "aws_iam_policy_document" "github_actions" {
+data "aws_iam_policy_document" "github_application_publisher" {
+  for_each = var.github_repositories
+
   statement {
     actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
@@ -159,24 +170,148 @@ data "aws_iam_policy_document" "github_actions" {
       "ecr:InitiateLayerUpload",
       "ecr:PutImage",
       "ecr:UploadLayerPart",
-      "ecr:BatchGetImage"
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages"
     ]
-    resources = [for repository in aws_ecr_repository.services : repository.arn]
+    resources = [aws_ecr_repository.services[each.key].arn]
   }
 
-  statement {
-    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
-    resources = [aws_s3_bucket.platform["dvc"].arn]
+  dynamic "statement" {
+    for_each = each.key == "training" ? [true] : []
+    content {
+      actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+      resources = [aws_s3_bucket.platform["dvc"].arn]
+    }
   }
 
-  statement {
-    actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.platform["dvc"].arn}/*"]
+  dynamic "statement" {
+    for_each = each.key == "training" ? [true] : []
+    content {
+      actions   = ["s3:GetObject", "s3:PutObject"]
+      resources = ["${aws_s3_bucket.platform["dvc"].arn}/*"]
+    }
   }
 }
 
-resource "aws_iam_role_policy" "github_actions" {
-  name   = "build-and-publish"
-  role   = aws_iam_role.github_actions.id
-  policy = data.aws_iam_policy_document.github_actions.json
+resource "aws_iam_role_policy" "github_application_publisher" {
+  for_each = var.github_repositories
+  name     = "build-and-publish"
+  role     = aws_iam_role.github_application_publisher[each.key].id
+  policy   = data.aws_iam_policy_document.github_application_publisher[each.key].json
+}
+
+data "aws_iam_policy_document" "github_gitops_automation_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [data.terraform_remote_state.bootstrap.outputs.github_oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["${var.github_oidc_subject_prefixes[var.gitops_repository]}:ref:refs/heads/main"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_gitops_automation" {
+  name               = "${local.name}-github-gitops-automation"
+  assume_role_policy = data.aws_iam_policy_document.github_gitops_automation_trust.json
+}
+
+data "aws_iam_policy_document" "github_gitops_automation" {
+  statement {
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = [aws_secretsmanager_secret.gitops_automation_github_app.arn]
+  }
+
+  # Renderer workflows verify immutable Cosign signatures before opening a
+  # release PR. They can inspect images but cannot upload, retag or delete any.
+  statement {
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = [for repository in aws_ecr_repository.services : repository.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_gitops_automation" {
+  name   = "read-gitops-automation-secret"
+  role   = aws_iam_role.github_gitops_automation.id
+  policy = data.aws_iam_policy_document.github_gitops_automation.json
+}
+
+data "aws_iam_policy_document" "github_release_automation_publish_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [data.terraform_remote_state.bootstrap.outputs.github_oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["${var.github_oidc_subject_prefixes[var.gitops_repository]}:ref:refs/heads/main"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_release_automation_publish" {
+  name               = "${local.name}-github-release-automation-publish"
+  assume_role_policy = data.aws_iam_policy_document.github_release_automation_publish_trust.json
+}
+
+data "aws_iam_policy_document" "github_release_automation_publish" {
+  statement {
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:CompleteLayerUpload",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages",
+    ]
+    resources = [aws_ecr_repository.services["dispatcher"].arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_release_automation_publish" {
+  name   = "publish-release-automation-image"
+  role   = aws_iam_role.github_release_automation_publish.id
+  policy = data.aws_iam_policy_document.github_release_automation_publish.json
 }

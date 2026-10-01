@@ -114,9 +114,16 @@ resource "aws_s3_bucket_notification" "dataset_events" {
 }
 
 resource "aws_ecr_repository" "services" {
-  for_each             = toset(["training", "mlflow", "inference"])
+  for_each             = toset(["training", "mlflow", "inference", "dispatcher"])
   name                 = "${local.name}/${each.key}"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "IMMUTABLE_WITH_EXCLUSION"
+
+  # Release tags remain immutable. Cosign's OCI 1.1 fallback writes signatures
+  # as sha256-* tags and must be able to replace the same signature on retries.
+  image_tag_mutability_exclusion_filter {
+    filter      = "sha256-*"
+    filter_type = "WILDCARD"
+  }
 
   image_scanning_configuration {
     scan_on_push = true
@@ -129,11 +136,12 @@ resource "aws_ecr_lifecycle_policy" "services" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep the latest 30 images"
+      description  = "Expire only untagged build debris after 14 days"
       selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 30
+        tagStatus   = "untagged"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = 14
       }
       action = { type = "expire" }
     }]

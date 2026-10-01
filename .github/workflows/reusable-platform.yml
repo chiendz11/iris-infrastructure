@@ -1,0 +1,80 @@
+name: reusable-platform
+
+on:
+  workflow_call:
+    inputs:
+      foundation:
+        description: Selected non-secret outputs from foundation in this run; empty uses existing configuration
+        type: string
+        default: '{}'
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_state_bucket_name: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+  TF_VAR_state_kms_key_arn: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+  TF_VAR_enable_public_domain: ${{ vars.ENABLE_PUBLIC_DOMAIN || 'false' }}
+  TF_VAR_admin_role_arns: ${{ vars.ADMIN_ROLE_ARNS_JSON || '[]' }}
+
+jobs:
+  apply-platform:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Reject stale or non-production execution before credentials
+        run: bash scripts/assert-current-main.sh
+      - name: Validate production automation configuration
+        env:
+          APPLY_ROLE_ARN: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          STATE_BUCKET: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+          STATE_KMS_KEY_ARN: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+        run: |
+          test -n "${APPLY_ROLE_ARN}" || { echo "TERRAFORM_APPLY_ROLE_ARN is required." >&2; exit 1; }
+          test -n "${STATE_BUCKET}" || { echo "TF_STATE_BUCKET is required." >&2; exit 1; }
+          test -n "${STATE_KMS_KEY_ARN}" || { echo "TF_STATE_KMS_KEY_ARN is required." >&2; exit 1; }
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Publish reconciliation provenance
+        env:
+          SOURCE: ${{ github.event_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## Platform reconciliation"
+            echo
+            echo "- Requested by: ${SOURCE}"
+            echo "- Initiating commit: \`${SOURCE_SHA}\`"
+            echo "- Applied event commit: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Initialize platform remote state
+        working-directory: terraform/platform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}"
+      - name: Require the configured public domain to be ready
+        env:
+          PUBLIC_DOMAIN_NAME: ${{ vars.PUBLIC_DOMAIN_NAME }}
+        run: bash scripts/require-domain-ready.sh
+      - name: Apply authoritative platform plan
+        working-directory: terraform/platform
+        run: |
+          terraform plan -var-file=../../environments/production.tfvars -out=tfplan
+          bash ../../scripts/assert-current-main.sh
+          terraform apply tfplan

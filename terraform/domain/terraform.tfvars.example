@@ -1,0 +1,8 @@
+project_name         = "iris-mlops"
+environment          = "prod"
+enable_public_domain = true
+domain_name          = "example.com"
+
+# CI keeps this false in the zone phase and sets it true only after its public
+# DNS verification job succeeds. Do not manage it as a GitHub variable.
+domain_delegated = false

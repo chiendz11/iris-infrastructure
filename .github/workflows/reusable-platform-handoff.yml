@@ -1,0 +1,170 @@
+name: reusable-platform-handoff
+
+on:
+  workflow_call:
+    inputs:
+      foundation:
+        description: Selected non-secret outputs from foundation in this run; empty uses existing configuration
+        type: string
+        default: '{}'
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_state_bucket_name: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+  TF_VAR_state_kms_key_arn: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+  TF_VAR_enable_public_domain: ${{ vars.ENABLE_PUBLIC_DOMAIN || 'false' }}
+  TF_VAR_admin_role_arns: ${{ vars.ADMIN_ROLE_ARNS_JSON || '[]' }}
+
+jobs:
+  handoff:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Reject stale or non-production execution before credentials
+        run: bash scripts/assert-current-main.sh
+      - name: Validate production automation configuration
+        env:
+          APPLY_ROLE_ARN: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          STATE_BUCKET: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+          STATE_KMS_KEY_ARN: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+          PLATFORM_PUBLISHER_APP_CLIENT_ID: ${{ vars.PLATFORM_CONTRACT_PUBLISHER_APP_CLIENT_ID }}
+          PLATFORM_PUBLISHER_ACTOR: ${{ vars.PLATFORM_CONTRACT_PUBLISHER_ACTOR }}
+        run: |
+          test -n "${APPLY_ROLE_ARN}" || { echo "TERRAFORM_APPLY_ROLE_ARN is required." >&2; exit 1; }
+          test -n "${STATE_BUCKET}" || { echo "TF_STATE_BUCKET is required." >&2; exit 1; }
+          test -n "${STATE_KMS_KEY_ARN}" || { echo "TF_STATE_KMS_KEY_ARN is required." >&2; exit 1; }
+          test -n "${PLATFORM_PUBLISHER_APP_CLIENT_ID}" || {
+            echo "PLATFORM_CONTRACT_PUBLISHER_APP_CLIENT_ID is required." >&2
+            exit 1
+          }
+          [[ "${PLATFORM_PUBLISHER_ACTOR}" == *'[bot]' ]] || {
+            echo "PLATFORM_CONTRACT_PUBLISHER_ACTOR must be an exact GitHub App bot login." >&2
+            exit 1
+          }
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Initialize platform remote state
+        working-directory: terraform/platform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}"
+      - name: Require the configured public domain to be ready
+        env:
+          PUBLIC_DOMAIN_NAME: ${{ vars.PUBLIC_DOMAIN_NAME }}
+        run: bash scripts/require-domain-ready.sh
+      - name: Require current platform code to match refreshed state without applying
+        working-directory: terraform/platform
+        run: |
+          set +e
+          terraform plan -var-file=../../environments/production.tfvars -detailed-exitcode -out=handoff.tfplan
+          result=$?
+          set -e
+          if [[ "${result}" != 0 ]]; then
+            echo "Platform plan failed or has unapplied changes; run scope=platform before handoff." >&2
+            exit 1
+          fi
+      - name: Export non-secret infrastructure outputs
+        run: terraform -chdir=terraform/platform output -json > terraform-outputs.json
+      - name: Install pinned platform-contract validator
+        run: python -m pip install --requirement requirements-contract.txt
+      - name: Build and validate platform contract v1
+        run: |
+          python scripts/build_platform_contract.py \
+            --terraform-outputs terraform-outputs.json \
+            --schema contracts/platform-contract-v1.schema.json \
+            --output platform-contract.json \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${GITHUB_SHA}" \
+            --change-id "run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "## Platform contract v1"
+            echo
+            echo "The contract contains selected non-secret outputs only."
+            echo '```json'
+            jq . platform-contract.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Verify runtime GitHub App credentials are seeded
+        run: |
+          set -euo pipefail
+          MODEL_RELEASE_PUBLISHER_SECRET_ARN="$(jq -er '.model_release_publisher_github_app_secret_arn.value' terraform-outputs.json)"
+          GITOPS_AUTOMATION_SECRET_ARN="$(jq -er '.gitops_automation_github_app_secret_arn.value' terraform-outputs.json)"
+          missing=()
+          for entry in \
+            "model-release-publisher:${MODEL_RELEASE_PUBLISHER_SECRET_ARN}" \
+            "gitops-automation:${GITOPS_AUTOMATION_SECRET_ARN}"; do
+            kind="${entry%%:*}"
+            secret_arn="${entry#*:}"
+            version_stages="$(aws secretsmanager describe-secret \
+              --secret-id "${secret_arn}" \
+              --query VersionIdsToStages \
+              --output json)"
+            if ! jq -e 'any(((. // {}) | to_entries[]); .value | index("AWSCURRENT") != null)' \
+              <<<"${version_stages}" >/dev/null; then
+              missing+=("${kind}")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            {
+              echo "## Platform handoff is blocked"
+              echo
+              echo "Terraform created the secret containers, but these credentials have no AWSCURRENT version:"
+              printf -- '- %s\n' "${missing[@]}"
+              echo
+              echo "Seed them with \`scripts/seed-github-app-secret.sh\`, then rerun failed jobs or dispatch production-infra.yml with scope=handoff."
+              echo "No secret value was read or printed by this check."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "Runtime GitHub App credentials are not seeded: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Reject stale publication after preflight
+        run: bash scripts/assert-current-main.sh
+
+      - name: Mint dedicated platform contract publisher token
+        id: platform-publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PLATFORM_CONTRACT_PUBLISHER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PLATFORM_CONTRACT_PUBLISHER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: iris-gitops
+          permission-actions: write
+
+      - name: Dispatch platform contract after trusted variables exist
+        env:
+          GH_TOKEN: ${{ steps.platform-publisher-token.outputs.token }}
+          GITOPS_REPOSITORY: ${{ vars.GITOPS_REPOSITORY || 'chiendz11/iris-gitops' }}
+        run: |
+          set -euo pipefail
+          bash scripts/assert-current-main.sh
+          PLATFORM_CONTRACT="$(jq -c . platform-contract.json)"
+          gh api "repos/${GITOPS_REPOSITORY}/actions/workflows/platform-reconcile.yml" \
+            --jq '.path' >/dev/null || {
+            echo "Platform publisher cannot access platform-reconcile.yml in ${GITOPS_REPOSITORY}." >&2
+            exit 1
+          }
+          gh workflow run platform-reconcile.yml \
+            --repo "${GITOPS_REPOSITORY}" \
+            --ref main \
+            --field contract="${PLATFORM_CONTRACT}"
+          echo "Dispatched platform-contract-v1 after GitHub variables were reconciled."

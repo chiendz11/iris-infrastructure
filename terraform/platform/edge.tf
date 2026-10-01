@@ -1,56 +1,29 @@
-check "public_domain_inputs" {
+data "terraform_remote_state" "domain" {
+  count   = var.enable_public_domain ? 1 : 0
+  backend = "s3"
+
+  config = {
+    bucket     = var.state_bucket_name
+    key        = "infrastructure/domain.tfstate"
+    region     = var.aws_region
+    encrypt    = true
+    kms_key_id = var.state_kms_key_arn
+  }
+}
+
+locals {
+  public_domain_name     = try(data.terraform_remote_state.domain[0].outputs.domain_name, null)
+  route53_zone_id        = try(data.terraform_remote_state.domain[0].outputs.route53_zone_id, null)
+  public_certificate_arn = try(data.terraform_remote_state.domain[0].outputs.public_certificate_arn, null)
+  domain_ready           = try(data.terraform_remote_state.domain[0].outputs.domain_ready, false)
+  kserve_hostname        = local.public_domain_name == null ? null : "${var.kserve_subdomain}.${local.public_domain_name}"
+}
+
+check "public_domain_ready" {
   assert {
-    condition = !var.enable_public_domain || (
-      var.route53_zone_id != null && var.public_domain_name != null
-    )
-    error_message = "route53_zone_id and public_domain_name are required when enable_public_domain is true."
+    condition     = !var.enable_public_domain || local.domain_ready
+    error_message = "The domain stack must be delegated and its ACM certificate issued before enabling the platform public domain."
   }
-}
-
-locals {
-  kserve_hostname = var.public_domain_name == null ? null : "${var.kserve_subdomain}.${var.public_domain_name}"
-}
-
-resource "aws_acm_certificate" "public" {
-  count = var.enable_public_domain ? 1 : 0
-
-  domain_name               = var.public_domain_name
-  subject_alternative_names = var.public_domain_name == null ? [] : ["*.${var.public_domain_name}"]
-  validation_method         = "DNS"
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-locals {
-  public_certificate_validation_records = var.enable_public_domain ? {
-    for option in aws_acm_certificate.public[0].domain_validation_options : option.domain_name => {
-      name   = option.resource_record_name
-      record = option.resource_record_value
-      type   = option.resource_record_type
-    }
-  } : {}
-}
-
-resource "aws_route53_record" "public_certificate_validation" {
-  for_each = local.public_certificate_validation_records
-
-  allow_overwrite = true
-  zone_id         = var.route53_zone_id
-  name            = each.value.name
-  type            = each.value.type
-  ttl             = 60
-  records         = [each.value.record]
-}
-
-resource "aws_acm_certificate_validation" "public" {
-  count = var.enable_public_domain ? 1 : 0
-
-  certificate_arn = aws_acm_certificate.public[0].arn
-  validation_record_fqdns = [
-    for record in aws_route53_record.public_certificate_validation : record.fqdn
-  ]
 }
 
 module "aws_load_balancer_controller_irsa" {

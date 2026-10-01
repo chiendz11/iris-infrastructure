@@ -1,0 +1,9 @@
+github_owner = "chiendz11"
+
+# Discover protect-main and import only verified existing policies; create missing ones.
+discover_existing_rulesets = true
+# Optional migration assertion only; do not copy old ruleset IDs into a new account.
+existing_ruleset_ids = {}
+
+# Authentication is never configured here. Export a short-lived GitHub App
+# installation token as GITHUB_TOKEN before running Terraform locally.

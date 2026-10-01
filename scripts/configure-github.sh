@@ -1,34 +1,64 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 3 ]]; then
-  echo "usage: $0 <state-bucket> <public-domain> <route53-zone-id> [admin-role-arn]" >&2
+if [[ $# -ne 2 ]]; then
+  echo "usage: $0 <public-domain> <admin-role-arn-or-empty>" >&2
+  echo "Solo profile: the personal repository owner is the deployment approver. Existing setups should use configure-solo-environment.sh." >&2
   exit 2
 fi
 
-STATE_BUCKET=$1
-PUBLIC_DOMAIN=$2
-ROUTE53_ZONE_ID=$3
-ADMIN_ROLE_ARN=${4:-}
+PUBLIC_DOMAIN=$1
+ADMIN_ROLE_ARN=${2:-}
 REPOSITORY=${GITHUB_REPOSITORY:-chiendz11/iris-infrastructure}
 
+echo "DAY-0 ONLY: this script seeds the infrastructure root of trust."
+echo "After terraform/github-config is adopted, Terraform owns non-secret GitHub variables."
+
+STATE_BUCKET=$(terraform -chdir=terraform/bootstrap output -raw state_bucket)
 PLAN_ROLE_ARN=$(terraform -chdir=terraform/bootstrap output -raw terraform_plan_role_arn)
 APPLY_ROLE_ARN=$(terraform -chdir=terraform/bootstrap output -raw terraform_apply_role_arn)
+GOVERNANCE_PLAN_ROLE_ARN=$(terraform -chdir=terraform/bootstrap output -raw github_governance_plan_role_arn)
+GOVERNANCE_APPLY_ROLE_ARN=$(terraform -chdir=terraform/bootstrap output -raw github_governance_apply_role_arn)
+GITHUB_CONFIG_PLAN_ROLE_ARN=$(terraform -chdir=terraform/bootstrap output -raw github_config_plan_role_arn)
+GITHUB_CONFIG_APPLY_ROLE_ARN=$(terraform -chdir=terraform/bootstrap output -raw github_config_apply_role_arn)
 KMS_KEY_ARN=$(terraform -chdir=terraform/bootstrap output -raw state_kms_key_arn)
 ADMIN_ROLE_ARNS='[]'
 if [[ -n "$ADMIN_ROLE_ARN" ]]; then
+  [[ "${ADMIN_ROLE_ARN}" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$ ]] || {
+    echo "admin-role-arn must be an IAM role ARN or an empty string." >&2
+    exit 1
+  }
   ADMIN_ROLE_ARNS=$(printf '["%s"]' "$ADMIN_ROLE_ARN")
 fi
 
-gh variable set AWS_REGION --repo "$REPOSITORY" --body "ap-southeast-1"
-gh variable set TF_STATE_BUCKET --repo "$REPOSITORY" --body "$STATE_BUCKET"
-gh variable set TF_STATE_KMS_KEY_ARN --repo "$REPOSITORY" --body "$KMS_KEY_ARN"
-gh variable set TERRAFORM_PLAN_ROLE_ARN --repo "$REPOSITORY" --body "$PLAN_ROLE_ARN"
-gh variable set TERRAFORM_APPLY_ROLE_ARN --repo "$REPOSITORY" --body "$APPLY_ROLE_ARN"
-gh variable set ENABLE_PUBLIC_DOMAIN --repo "$REPOSITORY" --body "true"
-gh variable set PUBLIC_DOMAIN_NAME --repo "$REPOSITORY" --body "$PUBLIC_DOMAIN"
-gh variable set ROUTE53_ZONE_ID --repo "$REPOSITORY" --body "$ROUTE53_ZONE_ID"
-gh variable set ADMIN_ROLE_ARNS_JSON --repo "$REPOSITORY" --body "$ADMIN_ROLE_ARNS"
+bash "$(dirname "${BASH_SOURCE[0]}")/configure-solo-environment.sh"
 
-echo "Configured non-secret GitHub Actions variables for $REPOSITORY."
-echo "Add GITOPS_TOKEN as a repository secret, or replace it with a GitHub App token."
+set_variable() {
+  local name=$1
+  local value=$2
+
+  # Repository scope lets the read-only PR plan run without becoming a prod deployment.
+  # Environment scope provides the same inputs to protected-branch mutation jobs.
+  gh variable set "$name" --repo "$REPOSITORY" --body "$value"
+  gh variable set "$name" --repo "$REPOSITORY" --env prod --body "$value"
+}
+
+set_variable AWS_REGION "ap-southeast-1"
+set_variable TF_STATE_BUCKET "$STATE_BUCKET"
+set_variable TF_STATE_KMS_KEY_ARN "$KMS_KEY_ARN"
+set_variable TERRAFORM_PLAN_ROLE_ARN "$PLAN_ROLE_ARN"
+set_variable TERRAFORM_APPLY_ROLE_ARN "$APPLY_ROLE_ARN"
+set_variable TF_GOVERNANCE_PLAN_ROLE_ARN "$GOVERNANCE_PLAN_ROLE_ARN"
+set_variable TF_GOVERNANCE_APPLY_ROLE_ARN "$GOVERNANCE_APPLY_ROLE_ARN"
+set_variable TF_GITHUB_CONFIG_PLAN_ROLE_ARN "$GITHUB_CONFIG_PLAN_ROLE_ARN"
+set_variable TF_GITHUB_CONFIG_APPLY_ROLE_ARN "$GITHUB_CONFIG_APPLY_ROLE_ARN"
+set_variable ENABLE_PUBLIC_DOMAIN "true"
+set_variable PUBLIC_DOMAIN_NAME "$PUBLIC_DOMAIN"
+set_variable ADMIN_ROLE_ARNS_JSON "$ADMIN_ROLE_ARNS"
+
+echo "Configured non-secret repository and prod-environment variables for $REPOSITORY."
+echo "Use 'pr-gate' (not 'static') as the required infrastructure status check."
+echo "Configure the control-plane, component-publisher, platform-publisher and GitOps-automation Apps described in docs/GITHUB_CONTROL_PLANE.md."
+echo "All App private keys remain out of Terraform; place each only in the Environment or Secrets Manager container documented there."
+echo "Solo profile: no collaborator PR approval; the owner self-approves prod deployments. PR/CI remain required."
+echo "The normal lifecycle now uses Terraform; do not rerun this script for day-2 variable updates."

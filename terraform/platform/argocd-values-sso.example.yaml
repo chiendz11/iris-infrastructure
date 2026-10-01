@@ -1,0 +1,21 @@
+# Merge this file after provisioning a real OIDC/Dex client and syncing its
+# client secret into argocd-secret through External Secrets.
+configs:
+  cm:
+    url: https://argocd.example.com
+    admin.enabled: false
+    dex.config: |
+      connectors:
+        - type: github
+          id: github
+          name: GitHub
+          config:
+            clientID: $dex.github.clientId
+            clientSecret: $dex.github.clientSecret
+            orgs:
+              - name: REPLACE_GITHUB_ORGANIZATION
+  rbac:
+    scopes: "[groups]"
+
+dex:
+  enabled: true

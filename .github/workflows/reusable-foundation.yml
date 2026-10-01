@@ -1,0 +1,117 @@
+name: reusable-foundation
+
+on:
+  workflow_call:
+    inputs:
+      foundation:
+        description: Selected non-secret outputs from foundation in this run; empty uses existing configuration
+        type: string
+        default: '{}'
+    outputs:
+      context:
+        description: Non-secret context
+        value: ${{ jobs.apply-foundation.outputs.context }}
+      apply_role_changed:
+        description: Non-secret apply_role_changed
+        value: ${{ jobs.apply-foundation.outputs.apply_role_changed }}
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_state_bucket_name: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+
+jobs:
+  apply-foundation:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      context: ${{ steps.outputs.outputs.context }}
+      apply_role_changed: ${{ steps.outputs.outputs.apply_role_changed }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Reject stale or non-production execution before credentials
+        run: bash scripts/assert-current-main.sh
+      - name: Validate production automation configuration
+        env:
+          APPLY_ROLE_ARN: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          STATE_BUCKET: ${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}
+          STATE_KMS_KEY_ARN: ${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}
+        run: |
+          test -n "${APPLY_ROLE_ARN}" || { echo "TERRAFORM_APPLY_ROLE_ARN is required." >&2; exit 1; }
+          test -n "${STATE_BUCKET}" || { echo "TF_STATE_BUCKET is required." >&2; exit 1; }
+          test -n "${STATE_KMS_KEY_ARN}" || { echo "TF_STATE_KMS_KEY_ARN is required." >&2; exit 1; }
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ fromJSON(inputs.foundation).terraform_apply_role_arn || vars.TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Initialize foundation remote state
+        working-directory: terraform/bootstrap
+        run: |
+          cp backend.tf.example backend.tf
+          terraform init \
+            -backend-config="bucket=${{ fromJSON(inputs.foundation).state_bucket || vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ fromJSON(inputs.foundation).state_kms_key_arn || vars.TF_STATE_KMS_KEY_ARN }}"
+      - name: Capture current downstream dependency
+        id: before
+        working-directory: terraform/bootstrap
+        run: |
+          APPLY_ROLE_ARN="$(terraform output -raw terraform_apply_role_arn 2>/dev/null || true)"
+          echo "apply_role_arn=${APPLY_ROLE_ARN}" >> "${GITHUB_OUTPUT}"
+      - name: Apply authoritative foundation plan
+        working-directory: terraform/bootstrap
+        run: |
+          terraform plan -out=tfplan
+          bash ../../scripts/assert-current-main.sh
+          terraform apply tfplan
+      - name: Export selected non-secret dependency outputs
+        id: outputs
+        working-directory: terraform/bootstrap
+        env:
+          PREVIOUS_APPLY_ROLE_ARN: ${{ steps.before.outputs.apply_role_arn }}
+        run: |
+          context="$(terraform output -json | jq -ce '
+            with_entries(select(.key == "state_bucket" or .key == "state_kms_key_arn" or
+              .key == "terraform_apply_role_arn" or .key == "github_governance_apply_role_arn" or
+              .key == "github_config_apply_role_arn")) |
+            if length != 5 or any(.[]; .sensitive == true or (.value | type) != "string")
+            then error("Invalid foundation output contract") else map_values(.value) end')"
+          changed=false
+          if [[ "${PREVIOUS_APPLY_ROLE_ARN}" != "$(jq -r .terraform_apply_role_arn <<<"${context}")" ]]; then
+            changed=true
+          fi
+          echo "context=${context}" >> "${GITHUB_OUTPUT}"
+          echo "apply_role_changed=${changed}" >> "${GITHUB_OUTPUT}"
+      - name: Publish foundation result
+        working-directory: terraform/bootstrap
+        env:
+          SOURCE: ${{ github.event_name }}
+        run: |
+          {
+            echo "## Foundation reconciled"
+            echo
+            echo "- Requested by: ${SOURCE}"
+            echo "- Applied commit: \`${GITHUB_SHA}\`"
+            echo
+            echo "Terraform used remote state and applied the refreshed post-merge plan diff."
+            echo "The first bootstrap remains a local operation because its OIDC role"
+            echo "does not exist before that operation."
+            echo
+            echo '```json'
+            terraform output -json | jq 'with_entries(.value |= {value: .value})'
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

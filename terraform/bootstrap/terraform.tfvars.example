@@ -1,3 +1,6 @@
 aws_region        = "ap-southeast-1"
 project_name      = "iris-mlops"
 state_bucket_name = "REPLACE-WITH-GLOBALLY-UNIQUE-IRIS-TFSTATE-BUCKET"
+# For another repo/account, also set github_repository and github_oidc_subject_prefix.
+# Read the prefix with: gh api repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+# See docs/OIDC_RECOVERY.md. The committed defaults pin the current Iris repo IDs.

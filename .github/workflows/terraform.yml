@@ -1,156 +1,449 @@
-name: terraform-infrastructure
+name: terraform-pr
 
 on:
+  # Do not add a path filter here. This job is the required branch-protection
+  # check and must report success even for documentation-only pull requests.
   pull_request:
-    paths:
-      - "terraform/**"
-      - "environments/**"
-      - "scripts/**"
-      - ".github/workflows/terraform.yml"
-  push:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - "environments/**"
-      - "scripts/**"
-      - ".github/workflows/terraform.yml"
-  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
-
-concurrency:
-  group: terraform-production
-  cancel-in-progress: false
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-1' }}
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
   TF_VAR_state_bucket_name: ${{ vars.TF_STATE_BUCKET }}
+  TF_VAR_state_kms_key_arn: ${{ vars.TF_STATE_KMS_KEY_ARN }}
   TF_VAR_enable_public_domain: ${{ vars.ENABLE_PUBLIC_DOMAIN || 'false' }}
+  TF_VAR_domain_name: ${{ vars.PUBLIC_DOMAIN_NAME }}
   TF_VAR_public_domain_name: ${{ vars.PUBLIC_DOMAIN_NAME }}
-  TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
   TF_VAR_admin_role_arns: ${{ vars.ADMIN_ROLE_ARNS_JSON || '[]' }}
 
 jobs:
   static:
     runs-on: ubuntu-latest
+    outputs:
+      foundation_changed: ${{ steps.changes.outputs.foundation }}
+      governance_changed: ${{ steps.changes.outputs.governance }}
+      github_config_changed: ${{ steps.changes.outputs.github_config }}
+      domain_changed: ${{ steps.changes.outputs.domain }}
+      platform_changed: ${{ steps.changes.outputs.platform }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Detect Terraform root changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python scripts/plan_production.py --base "${BASE_SHA}" --head "${HEAD_SHA}" --mode pr
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.15.6"
-      - run: terraform fmt -check -recursive
-      - name: Validate bootstrap
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.18.6
+      - name: Validate GitHub Actions workflows
+        env:
+          ACTIONLINT_VERSION: 1.7.7
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+        run: |
+          archive="${RUNNER_TEMP}/actionlint.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "${archive}"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check
+          tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint" .github/workflows/*.yml
+      - name: Validate shell automation
+        run: bash -n scripts/*.sh
+      - name: Test foundation OIDC trust with mocked AWS only
         working-directory: terraform/bootstrap
+        run: |
+          terraform init -backend=false
+          terraform test -filter=tests/oidc.tftest.hcl
+      - name: Test GitHub configuration adoption with mocked providers only
+        working-directory: terraform/github-config
+        run: |
+          terraform init -backend=false
+          terraform test -filter=tests/adoption.tftest.hcl
+      - name: Test ruleset create/adopt guards with mocked providers only
+        working-directory: terraform/github-governance
+        run: |
+          terraform init -backend=false
+          terraform test -filter=tests/adoption.tftest.hcl
+      - name: Validate platform contract producer and solo automation
+        run: |
+          python -m pip install --requirement requirements-ci.txt
+          python -m unittest discover --start-directory tests --verbose
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+      - name: Render Terraform-owned Argo CD release
+        run: |
+          ARGOCD_CHART_VERSION="$(tr -d '[:space:]' < terraform/platform/argocd-chart-version.txt)"
+          test -n "${ARGOCD_CHART_VERSION}"
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm template argocd argo/argo-cd \
+            --version "${ARGOCD_CHART_VERSION}" \
+            --namespace argocd \
+            --values terraform/platform/argocd-values-production.yaml \
+            --values terraform/platform/argocd-root-application-values.yaml >/dev/null
+      - name: Validate foundation Terraform root
+        working-directory: terraform/bootstrap
+        run: terraform init -backend=false && terraform validate
+      - name: Validate GitHub governance Terraform root
+        working-directory: terraform/github-governance
+        run: terraform init -backend=false && terraform validate
+      - name: Validate GitHub configuration Terraform root
+        working-directory: terraform/github-config
+        run: terraform init -backend=false && terraform validate
+      - name: Validate domain
+        working-directory: terraform/domain
         run: terraform init -backend=false && terraform validate
       - name: Validate platform
         working-directory: terraform/platform
         run: terraform init -backend=false && terraform validate
 
-  plan:
-    if: github.event_name == 'pull_request' && vars.TERRAFORM_PLAN_ROLE_ARN != ''
+  plan-foundation:
+    if: >-
+      ${{ needs.static.outputs.foundation_changed == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          vars.TERRAFORM_PLAN_ROLE_ARN != '' }}
     needs: static
     runs-on: ubuntu-latest
-    environment: terraform-plan
-    strategy:
-      matrix:
-        stack: [bootstrap, platform]
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.15.6"
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Initialize remote state
-        working-directory: terraform/${{ matrix.stack }}
+      - name: Plan foundation
+        working-directory: terraform/bootstrap
         run: |
+          cp backend.tf.example backend.tf
           terraform init \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="region=${AWS_REGION}" \
             -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
-      - name: Plan
-        working-directory: terraform/${{ matrix.stack }}
-        run: |
-          if [[ "${{ matrix.stack }}" == "platform" ]]; then
-            terraform plan -no-color -var-file=../../environments/production.tfvars
-          else
-            terraform plan -no-color
-          fi
+          terraform plan -no-color
 
-  apply:
-    if: github.event_name != 'pull_request' && vars.TERRAFORM_APPLY_ROLE_ARN != ''
+  plan-domain:
+    if: >-
+      ${{ needs.static.outputs.domain_changed == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          vars.TERRAFORM_PLAN_ROLE_ARN != '' }}
     needs: static
     runs-on: ubuntu-latest
-    environment: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.15.6"
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          role-to-assume: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
+          role-to-assume: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Initialize bootstrap remote state
-        working-directory: terraform/bootstrap
+      - name: Install DNS verification tools
+        run: |
+          if ! command -v dig >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y dnsutils
+          fi
+      - name: Plan domain
+        working-directory: terraform/domain
         run: |
           terraform init \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="region=${AWS_REGION}" \
             -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
-      - name: Apply bootstrap
-        working-directory: terraform/bootstrap
-        run: |
-          terraform plan -out=tfplan
-          terraform apply tfplan
 
-      - name: Initialize platform remote state
-        working-directory: terraform/platform
+          DOMAIN_DELEGATED="$(
+            bash ../../scripts/detect-domain-delegation.sh \
+              "${TF_VAR_enable_public_domain}" \
+              "${TF_VAR_domain_name}"
+          )"
+
+          TF_VAR_domain_delegated="${DOMAIN_DELEGATED}" terraform plan -no-color
+
+  plan-governance:
+    if: >-
+      ${{ needs.static.outputs.governance_changed == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          (vars.TF_GOVERNANCE_PLAN_ROLE_ARN != '' || vars.TERRAFORM_PLAN_ROLE_ARN != '') }}
+    needs: static
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.TF_GOVERNANCE_PLAN_ROLE_ARN || vars.TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Plan GitHub governance without a write credential
+        working-directory: terraform/github-governance
+        env:
+          TF_VAR_github_owner: ${{ github.repository_owner }}
+          TF_VAR_discover_existing_rulesets: "false"
         run: |
           terraform init \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="region=${AWS_REGION}" \
             -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
-      - name: Apply platform
-        working-directory: terraform/platform
-        run: |
-          terraform plan -var-file=../../environments/production.tfvars -out=tfplan
-          terraform apply tfplan
-      - name: Export non-secret infrastructure outputs
-        run: terraform -chdir=terraform/platform output -json > terraform-outputs.json
-      - name: Checkout GitOps desired state
-        uses: actions/checkout@v4
+          # Speculative state-only plan: no live discovery/import and no App key
+          # in PR-controlled code. The protected job refreshes and adopts first.
+          echo "Ruleset existence/import is verified after merge in the protected governance job." >> "${GITHUB_STEP_SUMMARY}"
+          env -u GITHUB_TOKEN -u GH_TOKEN terraform plan -refresh=false -no-color
+
+  plan-github-config:
+    if: >-
+      ${{ needs.static.outputs.github_config_changed == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          (vars.TF_GITHUB_CONFIG_PLAN_ROLE_ARN != '' || vars.TERRAFORM_PLAN_ROLE_ARN != '') }}
+    needs: static
+    runs-on: ubuntu-latest
+    outputs:
+      plan_status: ${{ steps.status.outputs.plan_status }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
-          repository: chiendz11/iris-gitops
-          token: ${{ secrets.GITOPS_TOKEN }}
-          path: gitops
-      - name: Render infrastructure outputs into GitOps
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.TF_GITHUB_CONFIG_PLAN_ROLE_ARN || vars.TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Detect configuration and platform state
+        id: state
         run: |
-          python scripts/sync_gitops_outputs.py \
-            --outputs terraform-outputs.json \
-            --gitops gitops
-      - name: Open GitOps synchronization pull request
+          CONFIG_STATE_EXISTS=false
+          PLATFORM_STATE_EXISTS=false
+          if aws s3api head-object \
+            --bucket "${{ vars.TF_STATE_BUCKET }}" \
+            --key infrastructure/github-config.tfstate >/dev/null 2>&1; then
+            CONFIG_STATE_EXISTS=true
+          fi
+          if aws s3api head-object \
+            --bucket "${{ vars.TF_STATE_BUCKET }}" \
+            --key infrastructure/platform.tfstate >/dev/null 2>&1; then
+            PLATFORM_STATE_EXISTS=true
+          fi
+          echo "config_state_exists=${CONFIG_STATE_EXISTS}" >> "${GITHUB_OUTPUT}"
+          echo "platform_state_exists=${PLATFORM_STATE_EXISTS}" >> "${GITHUB_OUTPUT}"
+      - name: Plan GitHub configuration without a write credential
+        id: plan
+        if: >-
+          ${{ steps.state.outputs.config_state_exists == 'true' &&
+              needs.static.outputs.foundation_changed != 'true' &&
+              needs.static.outputs.platform_changed != 'true' }}
+        working-directory: terraform/github-config
         env:
-          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          TF_VAR_github_owner: ${{ github.repository_owner }}
+          TF_VAR_inference_publisher_app_client_id: ${{ vars.INFERENCE_PUBLISHER_APP_CLIENT_ID }}
+          TF_VAR_model_registry_publisher_app_client_id: ${{ vars.MODEL_REGISTRY_PUBLISHER_APP_CLIENT_ID }}
+          TF_VAR_platform_contract_publisher_actor: ${{ vars.PLATFORM_CONTRACT_PUBLISHER_ACTOR }}
+          TF_VAR_inference_publisher_actor: ${{ vars.INFERENCE_PUBLISHER_ACTOR }}
+          TF_VAR_model_registry_publisher_actor: ${{ vars.MODEL_REGISTRY_PUBLISHER_ACTOR }}
+          TF_VAR_model_release_publisher_actor: ${{ vars.MODEL_RELEASE_PUBLISHER_ACTOR }}
+          TF_VAR_manage_application_config: ${{ steps.state.outputs.platform_state_exists }}
+          # No live discovery or privileged App credential in PRs.
+          TF_VAR_discover_existing_configuration: "false"
         run: |
-          cd gitops
-          if git diff --quiet; then
-            echo "GitOps already matches Terraform outputs."
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
+          # The state already contains remote IDs. refresh=false prevents PR code
+          # from requiring a GitHub App write credential; protected apply refreshes.
+          env -u GITHUB_TOKEN -u GH_TOKEN terraform plan -refresh=false -no-color
+      - name: Record configuration plan status
+        id: status
+        if: always()
+        env:
+          CONFIG_STATE_EXISTS: ${{ steps.state.outputs.config_state_exists }}
+          FOUNDATION_CHANGED: ${{ needs.static.outputs.foundation_changed }}
+          PLATFORM_CHANGED: ${{ needs.static.outputs.platform_changed }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+        run: |
+          if [[ "${CONFIG_STATE_EXISTS}" != "true" ]]; then
+            echo "Initial adoption: refreshed GitHub plan is deferred to the protected apply job."
+            echo "plan_status=deferred-initial-adoption" >> "${GITHUB_OUTPUT}"
+          elif [[ "${FOUNDATION_CHANGED}" == "true" || "${PLATFORM_CHANGED}" == "true" ]]; then
+            echo "GitHub configuration plan is deferred behind an upstream state change in this PR."
+            echo "plan_status=deferred-upstream" >> "${GITHUB_OUTPUT}"
+          elif [[ "${PLAN_OUTCOME}" == "success" ]]; then
+            echo "plan_status=planned" >> "${GITHUB_OUTPUT}"
+          else
+            echo "plan_status=failed" >> "${GITHUB_OUTPUT}"
+          fi
+
+  plan-platform:
+    if: >-
+      ${{ needs.static.outputs.platform_changed == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          vars.TERRAFORM_PLAN_ROLE_ARN != '' }}
+    needs: static
+    runs-on: ubuntu-latest
+    outputs:
+      plan_status: ${{ steps.status.outputs.plan_status }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.15.6"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Confirm domain dependency is ready
+        id: domain
+        run: |
+          if [[ "${{ vars.ENABLE_PUBLIC_DOMAIN }}" != "true" ]]; then
+            echo "ready=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          BRANCH="infra/sync-${{ github.sha }}-${{ github.run_attempt }}"
-          git checkout -b "${BRANCH}"
-          git config user.name "iris-infra-bot"
-          git config user.email "iris-infra-bot@users.noreply.github.com"
-          git add -- applications environments platform
-          git commit -m "chore(platform): sync Terraform outputs"
-          git push origin "${BRANCH}"
-          gh pr create --repo chiendz11/iris-gitops --base main --head "${BRANCH}" \
-            --title "chore(platform): sync Terraform outputs" \
-            --body "Generated from chiendz11/iris-infrastructure@${{ github.sha }}. No secret values are included."
+
+          DOMAIN_STATE="$(
+            aws s3 cp \
+              "s3://${{ vars.TF_STATE_BUCKET }}/infrastructure/domain.tfstate" - \
+              2>/dev/null || true
+          )"
+          DOMAIN_READY="$(
+            jq -r '.outputs.domain_ready.value // false' <<<"${DOMAIN_STATE}" \
+              2>/dev/null || echo false
+          )"
+          if [[ "${DOMAIN_READY}" != "true" ]]; then
+            if [[ "${{ needs.static.outputs.domain_changed }}" == "true" ]]; then
+              echo "Platform plan is deferred until this PR's domain change completes."
+              echo "ready=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo "Domain delegation and ACM validation must complete before platform plan." >&2
+            exit 1
+          fi
+          echo "ready=true" >> "${GITHUB_OUTPUT}"
+      - name: Plan platform
+        id: plan
+        if: steps.domain.outputs.ready == 'true'
+        working-directory: terraform/platform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY_ARN }}"
+          # The authoritative refreshed plan runs in the protected apply job.
+          # PR credentials intentionally cannot read Helm release Secrets in EKS.
+          terraform plan -refresh=false -no-color \
+            -var-file=../../environments/production.tfvars
+      - name: Record platform plan status
+        id: status
+        if: always()
+        env:
+          DOMAIN_READY: ${{ steps.domain.outputs.ready }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+        run: |
+          if [[ "${DOMAIN_READY}" == "false" ]]; then
+            echo "plan_status=deferred" >> "${GITHUB_OUTPUT}"
+          elif [[ "${PLAN_OUTCOME}" == "success" ]]; then
+            echo "plan_status=planned" >> "${GITHUB_OUTPUT}"
+          else
+            echo "plan_status=failed" >> "${GITHUB_OUTPUT}"
+          fi
+
+  pr-gate:
+    if: always()
+    needs: [static, plan-foundation, plan-governance, plan-github-config, plan-domain, plan-platform]
+    runs-on: ubuntu-latest
+    env:
+      STATIC_RESULT: ${{ needs.static.result }}
+      FOUNDATION_CHANGED: ${{ needs.static.outputs.foundation_changed }}
+      FOUNDATION_RESULT: ${{ needs.plan-foundation.result }}
+      GOVERNANCE_CHANGED: ${{ needs.static.outputs.governance_changed }}
+      GOVERNANCE_RESULT: ${{ needs.plan-governance.result }}
+      GITHUB_CONFIG_CHANGED: ${{ needs.static.outputs.github_config_changed }}
+      GITHUB_CONFIG_RESULT: ${{ needs.plan-github-config.result }}
+      GITHUB_CONFIG_PLAN_STATUS: ${{ needs.plan-github-config.outputs.plan_status }}
+      DOMAIN_CHANGED: ${{ needs.static.outputs.domain_changed }}
+      DOMAIN_RESULT: ${{ needs.plan-domain.result }}
+      PLATFORM_CHANGED: ${{ needs.static.outputs.platform_changed }}
+      PLATFORM_RESULT: ${{ needs.plan-platform.result }}
+      PLATFORM_PLAN_STATUS: ${{ needs.plan-platform.outputs.plan_status }}
+    steps:
+      - name: Require every applicable validation and plan
+        run: |
+          if [[ "${STATIC_RESULT}" != "success" ]]; then
+            echo "Static validation did not succeed: ${STATIC_RESULT}" >&2
+            exit 1
+          fi
+
+          require_plan() {
+            local root=$1
+            local changed=$2
+            local result=$3
+
+            if [[ "${changed}" == "true" && "${result}" != "success" ]]; then
+              echo "${root} changed, but its Terraform plan result was ${result}." >&2
+              exit 1
+            fi
+          }
+
+          require_plan foundation "${FOUNDATION_CHANGED}" "${FOUNDATION_RESULT}"
+          require_plan governance "${GOVERNANCE_CHANGED}" "${GOVERNANCE_RESULT}"
+          require_plan github-config "${GITHUB_CONFIG_CHANGED}" "${GITHUB_CONFIG_RESULT}"
+          require_plan domain "${DOMAIN_CHANGED}" "${DOMAIN_RESULT}"
+          require_plan platform "${PLATFORM_CHANGED}" "${PLATFORM_RESULT}"
+
+          if [[ "${GITHUB_CONFIG_CHANGED}" == "true" ]]; then
+            case "${GITHUB_CONFIG_PLAN_STATUS}" in
+              planned|deferred-initial-adoption) ;;
+              deferred-upstream)
+                if [[ "${FOUNDATION_CHANGED}" != "true" && "${PLATFORM_CHANGED}" != "true" ]]; then
+                  echo "GitHub configuration may only defer behind a foundation/platform change." >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "Unexpected GitHub configuration plan status: ${GITHUB_CONFIG_PLAN_STATUS}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ "${PLATFORM_CHANGED}" == "true" ]]; then
+            case "${PLATFORM_PLAN_STATUS}" in
+              planned) ;;
+              deferred)
+                if [[ "${DOMAIN_CHANGED}" != "true" ]]; then
+                  echo "Platform plan may only be deferred behind a domain change in the same PR." >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "Unexpected platform plan status: ${PLATFORM_PLAN_STATUS}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          echo "PR gate satisfied (platform plan status: ${PLATFORM_PLAN_STATUS:-not-applicable})."

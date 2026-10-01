@@ -2,17 +2,30 @@ locals {
   name = "${var.project_name}-${var.environment}"
   azs  = slice(data.aws_availability_zones.available.names, 0, var.az_count)
 
-  access_entries = {
-    for index, arn in var.admin_role_arns : "admin-${index}" => {
-      principal_arn = arn
-      policy_associations = {
-        admin = {
-          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = { type = "cluster" }
+  access_entries = merge(
+    {
+      terraform-apply = {
+        principal_arn = local.terraform_apply_role_arn
+        policy_associations = {
+          gitops-controller = {
+            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+            access_scope = { type = "cluster" }
+          }
+        }
+      }
+    },
+    {
+      for index, arn in var.admin_role_arns : "admin-${index}" => {
+        principal_arn = arn
+        policy_associations = {
+          admin = {
+            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+            access_scope = { type = "cluster" }
+          }
         }
       }
     }
-  }
+  )
 
   service_accounts = merge({
     mlflow           = { namespace = "mlops", name = "mlflow" }
