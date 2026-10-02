@@ -8,6 +8,12 @@ module "eks" {
   endpoint_public_access = true
   enable_irsa            = true
 
+  # Keep KMS administration stable across CI and break-glass local recovery.
+  # Without an explicit value the EKS module derives the administrator from
+  # the current Terraform caller, causing policy drift between the protected
+  # GitHub apply role and an operator session.
+  kms_key_administrators = [local.terraform_apply_role_arn]
+
   vpc_id                   = module.vpc.vpc_id
   subnet_ids               = module.vpc.private_subnets
   control_plane_subnet_ids = module.vpc.private_subnets
