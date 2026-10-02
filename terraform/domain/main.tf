@@ -22,25 +22,29 @@ resource "aws_acm_certificate" "public" {
 }
 
 locals {
-  certificate_validation_options = var.enable_public_domain && var.domain_delegated ? {
-    for option in aws_acm_certificate.public[0].domain_validation_options :
-    option.resource_record_name => {
-      name   = option.resource_record_name
-      record = option.resource_record_value
-      type   = option.resource_record_type
-    }...
-  } : {}
+  # ACM exposes domain_validation_options only after the certificate request,
+  # so those computed values cannot identify for_each instances in the initial
+  # plan. The certificate contains only the apex and its wildcard; ACM documents
+  # that this pair shares one validation CNAME. Use the configured apex as the
+  # stable instance key and keep all apply-time values in resource arguments.
+  certificate_validation_domains = var.enable_public_domain && var.domain_delegated ? toset([var.domain_name]) : toset([])
 }
 
 resource "aws_route53_record" "certificate_validation" {
-  for_each = local.certificate_validation_options
+  for_each = local.certificate_validation_domains
 
   allow_overwrite = true
   zone_id         = aws_route53_zone.public[0].zone_id
-  name            = each.value[0].name
-  type            = each.value[0].type
-  ttl             = 60
-  records         = [each.value[0].record]
+  name = one(distinct([
+    for option in aws_acm_certificate.public[0].domain_validation_options : option.resource_record_name
+  ]))
+  type = one(distinct([
+    for option in aws_acm_certificate.public[0].domain_validation_options : option.resource_record_type
+  ]))
+  ttl = 60
+  records = [one(distinct([
+    for option in aws_acm_certificate.public[0].domain_validation_options : option.resource_record_value
+  ]))]
 }
 
 resource "aws_acm_certificate_validation" "public" {
