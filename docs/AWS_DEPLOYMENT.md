@@ -99,8 +99,9 @@ WaitForFirstConsumer bình thường; Pending kéo dài sau scheduling cần xem
    commit, guard chặn run cũ: xem lại thay đổi và reconcile scope thích hợp trên main hiện tại.
    Domain day-2 không cần delegation mới thì ở cùng run; platform chỉ chạy nếu được chọn hoặc
    output domain được nó sử dụng đã thay đổi.
-9. Stage platform plan/apply AWS/EKS/EBS CSI, rồi Terraform Helm provider cài/nâng Argo CD và root
-   Application. Terraform state tiếp tục quản lý controller GitOps.
+9. Stage platform plan/apply AWS/EKS/EBS CSI. Terraform Helm provider cài/nâng Argo CD trước;
+   release thứ hai chỉ tạo root Application sau khi API server đã đăng ký Application CRD.
+   Terraform state tiếp tục quản lý cả controller và bootstrap release.
 10. `github-config-after` apply ECR/DVC/IAM/receiver Variables. Stage `handoff` đọc state, đòi hỏi
     platform plan không còn diff, build/schema-validate contract và kiểm tra AWSCURRENT của hai
     runtime App credential. Không đọc/log secret value. Thiếu seed làm handoff fail; AWS đã tồn tại.

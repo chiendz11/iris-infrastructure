@@ -80,7 +80,7 @@ jobs:
           python -m unittest discover --start-directory tests --verbose
       - name: Check Terraform formatting
         run: terraform fmt -check -recursive
-      - name: Render Terraform-owned Argo CD release
+      - name: Render Terraform-owned Argo CD releases
         run: |
           ARGOCD_CHART_VERSION="$(tr -d '[:space:]' < terraform/platform/argocd-chart-version.txt)"
           test -n "${ARGOCD_CHART_VERSION}"
@@ -88,8 +88,10 @@ jobs:
           helm template argocd argo/argo-cd \
             --version "${ARGOCD_CHART_VERSION}" \
             --namespace argocd \
-            --values terraform/platform/argocd-values-production.yaml \
-            --values terraform/platform/argocd-root-application-values.yaml >/dev/null
+            --values terraform/platform/argocd-values-production.yaml >/dev/null
+          helm lint terraform/platform/charts/argocd-root
+          helm template iris-root terraform/platform/charts/argocd-root \
+            --namespace argocd >/dev/null
       - name: Validate foundation Terraform root
         working-directory: terraform/bootstrap
         run: terraform init -backend=false && terraform validate

@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ required "application.name is required" .Values.application.name | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  project: {{ required "application.project is required" .Values.application.project | quote }}
+  source:
+    repoURL: {{ required "application.source.repoURL is required" .Values.application.source.repoURL | quote }}
+    targetRevision: {{ required "application.source.targetRevision is required" .Values.application.source.targetRevision | quote }}
+    path: {{ required "application.source.path is required" .Values.application.source.path | quote }}
+  destination:
+    server: {{ required "application.destination.server is required" .Values.application.destination.server | quote }}
+    namespace: {{ required "application.destination.namespace is required" .Values.application.destination.namespace | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -35,11 +35,29 @@ resource "helm_release" "argocd" {
   wait_for_jobs     = true
 
   values = [
-    file("${path.module}/argocd-values-production.yaml"),
-    file("${path.module}/argocd-root-application-values.yaml")
+    file("${path.module}/argocd-values-production.yaml")
   ]
 
   # The EKS module includes the managed node group and the explicit Access
   # Entry that authorizes the protected Terraform apply role.
   depends_on = [module.eks, aws_eks_addon.ebs_csi]
+}
+
+# A Custom Resource cannot be submitted until the API server has registered its
+# CRD. Keep the root Application in a second Helm release so the Argo CD chart
+# installs and establishes applications.argoproj.io before Helm validates this
+# manifest. Terraform remains the owner of both releases.
+resource "helm_release" "argocd_root" {
+  name      = "iris-root"
+  chart     = "${path.module}/charts/argocd-root"
+  namespace = "argocd"
+
+  atomic            = true
+  cleanup_on_fail   = true
+  dependency_update = false
+  max_history       = 10
+  timeout           = 300
+  wait              = true
+
+  depends_on = [helm_release.argocd]
 }
