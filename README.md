@@ -2,7 +2,7 @@
 
 Repository này sở hữu AWS foundation và automation cho platform MLOps: remote Terraform state,
 GitHub OIDC, public Route53/ACM domain, VPC/EKS, configurable RDS PostgreSQL, S3, SQS, ECR và IAM/IRSA.
-Repo này cũng sở hữu Helm release Argo CD và root Application. Desired state phía trên Argo CD
+Repo này cũng sở hữu Helm release Argo CD và Helm release riêng cho root Application. Desired state phía trên Argo CD
 thuộc `iris-gitops`; AWS Load Balancer Controller tạo NLB và ExternalDNS tự reconcile hostname
 `api.<domain>` vào Route53.
 
@@ -15,7 +15,7 @@ thuộc `iris-gitops`; AWS Load Balancer Controller tạo NLB và ExternalDNS t�
   Environment `prod`; root `iris-infrastructure/prod` vẫn là trust gate thủ công.
 - `terraform/domain`: public Route53 Hosted Zone, apex/wildcard ACM certificate và DNS validation.
 - `terraform/platform`: network, EKS, database, storage, registry, workload IAM,
-  `helm_release.argocd` và root Application.
+  `helm_release.argocd`, rồi `helm_release.argocd_root` sau khi Application CRD đã tồn tại.
 - `environments/production.tfvars`: cấu hình production không nhạy cảm, review được bằng Git.
   Profile triển khai hiện tại chịu guardrail của AWS Free Tier: EC2 eligible instance type,
   RDS Single-AZ, backup một ngày và không storage autoscaling. Terraform vẫn hỗ trợ bật lại
@@ -88,7 +88,7 @@ Ruleset import/migration: [GITHUB_GOVERNANCE.md](docs/GITHUB_GOVERNANCE.md).
 Ownership phải giữ cố định:
 
 ```text
-Terraform: AWS + EKS + Argo CD Helm release + root Application
+Terraform: AWS + EKS + Argo CD Helm release + ordered root Application release
 Argo CD:    AppProject + add-ons + platform configuration + workloads
 ```
 

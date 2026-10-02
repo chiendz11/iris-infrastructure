@@ -146,7 +146,7 @@ Auto-sync không phải auto-rollback theo sức khỏe. Xem [Argo CD automated 
   và reconcile. Không cấp wildcard administrator như cách sửa mặc định.
 - Platform apply xong nhưng GitHub config/contract fail: sửa đoạn bàn giao rồi retry từ state hiện
   hữu. Không destroy EKS/RDS vì credential GitHub thiếu.
-- helm_release.argocd có atomic=true: Helm có thể phục hồi release khi upgrade/install thất bại;
+- helm_release.argocd và helm_release.argocd_root có atomic=true: Helm có thể phục hồi từng release khi upgrade/install thất bại;
   điều đó không rollback các tài nguyên AWS đã apply, database hoặc toàn bộ CRDs. Với bản chart
   đã deploy thành công nhưng lỗi chức năng, sửa pin/values trong infrastructure rồi plan/apply.
 - EKS version: không coi giảm chuỗi version HCL là rollback đã được kiểm chứng. AWS hiện có rollback

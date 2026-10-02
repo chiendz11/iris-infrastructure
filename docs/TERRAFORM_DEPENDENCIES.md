@@ -198,15 +198,16 @@ bootstrap remote state
 module.eks (control plane + nodes + access entry)
   └── helm_release.argocd
         ├── chart argo-cd 10.4.0
-        ├── argocd-values-production.yaml
-        └── extraObjects
-              └── root Application → iris-gitops/applications
+        └── argocd-values-production.yaml
+              └── installs Argo CD CRDs/controllers
+                    └── helm_release.argocd_root
+                          └── root Application → iris-gitops/applications
 ```
 
 Argo CD không có self-management Application trong `iris-gitops`. Terraform Helm provider dùng
-EKS exec authentication và release state để install/upgrade idempotently. Root Application được
-render qua chart `extraObjects`; cách này tránh yêu cầu Terraform nhận diện Application CRD ở plan
-trước khi chart kịp cài CRD.
+EKS exec authentication và release state để install/upgrade idempotently. Root Application nằm
+trong local chart/release riêng, phụ thuộc tường minh vào controller release. Cạnh này bắt buộc API
+server đăng ký `applications.argoproj.io` trước khi Helm build/validate custom resource.
 
 Terraform tự suy ra các cạnh này từ tham chiếu như `module.vpc.vpc_id`; không cần `depends_on`
 thủ công.
