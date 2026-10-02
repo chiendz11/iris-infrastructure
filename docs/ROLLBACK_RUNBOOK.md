@@ -170,8 +170,10 @@ dispatch platform; một thay đổi DNS chưa chắc cần rollback image/model
 ## 12. RDS/S3/data recovery
 
 Multi-AZ phục vụ availability/failover, không bảo vệ khỏi ghi sai dữ liệu hoặc migration lỗi.
-RDS có backup retention 14 ngày và deletion protection trong prod. PITR tạo DB instance mới, không
-ghi đè instance cũ tại chỗ. Xem [AWS RDS PITR](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html).
+Deployment profile Free Tier hiện là Single-AZ, backup retention một ngày và deletion protection;
+do đó khả năng phục hồi thấp hơn production thật. Sau khi nâng account plan, đặt lại Multi-AZ và
+retention tối thiểu 14 ngày rồi kiểm thử restore. PITR tạo DB instance mới, không ghi đè instance
+cũ tại chỗ. Xem [AWS RDS PITR](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html).
 
 Trình tự khôi phục cần operator phối hợp:
 

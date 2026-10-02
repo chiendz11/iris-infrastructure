@@ -30,7 +30,7 @@ resource "aws_db_instance" "mlflow" {
   engine_version              = "16"
   instance_class              = var.db_instance_class
   allocated_storage           = 20
-  max_allocated_storage       = 100
+  max_allocated_storage       = var.db_max_allocated_storage
   storage_type                = "gp3"
   storage_encrypted           = true
   multi_az                    = var.db_multi_az
@@ -42,7 +42,7 @@ resource "aws_db_instance" "mlflow" {
   vpc_security_group_ids      = [aws_security_group.rds.id]
   publicly_accessible         = false
 
-  backup_retention_period   = var.environment == "prod" ? 14 : 3
+  backup_retention_period   = var.db_backup_retention_days
   deletion_protection       = var.environment == "prod"
   skip_final_snapshot       = var.environment != "prod"
   final_snapshot_identifier = var.environment == "prod" ? "${local.name}-final" : null

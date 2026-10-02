@@ -50,9 +50,11 @@ the supported kubectl skew. Image availability and runtime behavior still need d
 When upgrading beyond `1.34`, review that client too. Do not downgrade an existing cluster just
 because this initial-install profile has a lower version than the live cluster.
 
-The default cost profile is unchanged: 2 AZ, 3 x t3.medium, one NAT, RDS Multi-AZ; interface
-endpoints are disabled. This is not NAT-free, and node capacity has not been load-tested. Configure
-an AWS budget using your own threshold/contact before creating charged resources.
+The checked-in deployment profile uses 2 AZ, 3 x `c7i-flex.large`, one NAT and RDS Single-AZ;
+interface endpoints are disabled. The compute type was verified as Free-Tier-eligible and offered
+in both selected AZs for this account/region. Eligibility does not mean unlimited free usage: three
+nodes, EKS, NAT and RDS consume credits quickly. This is not NAT-free, and node capacity has not
+been load-tested. Configure an AWS budget before creating charged resources.
 
 In GitOps, both dispatcher secretKeyRefs must match ExternalSecret target
 `model-release-publisher-github-app` in namespace `argo`. The automated regression test verifies
@@ -194,7 +196,9 @@ là bắt buộc. Vì vậy lần deploy InferenceService đầu có thể tạm
 ## Các việc phải harden trước production
 
 - Authentication/WAF/rate limiting cho public KServe; authentication/RBAC riêng cho MLflow nội bộ.
-- RDS đã Multi-AZ và deletion-protected; còn thiếu restore test và alert storage/connections.
+- RDS module hỗ trợ Multi-AZ nhưng deployment profile hiện dùng Single-AZ do account Free Tier;
+  trước production thật phải nâng account plan, bật lại Multi-AZ/retention dài, chạy restore test
+  và bổ sung alert storage/connections.
 - Production HA thực tế cần NAT theo AZ; mô hình capstone dùng một NAT và S3 Gateway Endpoint.
 - NetworkPolicy egress cụ thể, admission policy, image signing và vulnerability gate.
 - ECR hiện chỉ dọn image untagged sau 14 ngày; SHA-tag bất biến đang được GitOps pin được giữ để
@@ -229,15 +233,16 @@ là bắt buộc. Vì vậy lần deploy InferenceService đầu có thể tạm
 
 ## Profile chi phí cho đồ án
 
-- Hai AZ đáp ứng yêu cầu subnet của EKS và cho phép RDS Multi-AZ.
-- Node group mặc định gồm ba `t3.medium`, giới hạn tối đa bốn node. Ba node là mức tối thiểu để
+- Hai AZ đáp ứng yêu cầu subnet của EKS và cho phép bật RDS Multi-AZ sau khi nâng account plan.
+- Node group hiện gồm ba `c7i-flex.large`, giới hạn tối đa bốn node. Ba node là mức tối thiểu để
   Redis HA của Argo CD phân tán được replica; vẫn dùng hai AZ để giữ chi phí capstone. Chưa cài
   Cluster Autoscaler/Karpenter nên `max_size=4` không tự tăng node; cần quan sát memory trước deploy.
 - Một NAT Gateway dùng chung giữ egress cho GitHub, Helm và public registries. Đây là điểm single
   failure được chấp nhận trong capstone, không phải cấu hình production HA hoàn chỉnh.
 - S3 Gateway Endpoint luôn bật. Interface Endpoint mặc định tắt vì mỗi service tạo ENI có phí ở
   từng AZ; chỉ bật sau khi so sánh chi phí và xác định nhu cầu private traffic.
-- RDS `db.t4g.micro` bật Multi-AZ, deletion protection và backup 14 ngày.
+- RDS `db.t4g.micro` hiện dùng Single-AZ, deletion protection, backup một ngày và không storage
+  autoscaling để thỏa guardrail Free Tier. Đây là demo constraint, không phải production HA.
 
 ## Public endpoint của KServe
 

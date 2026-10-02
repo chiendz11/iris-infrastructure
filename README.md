@@ -1,7 +1,7 @@
 # Iris infrastructure (repo 5/5)
 
 Repository này sở hữu AWS foundation và automation cho platform MLOps: remote Terraform state,
-GitHub OIDC, public Route53/ACM domain, VPC/EKS, RDS PostgreSQL Multi-AZ, S3, SQS, ECR và IAM/IRSA.
+GitHub OIDC, public Route53/ACM domain, VPC/EKS, configurable RDS PostgreSQL, S3, SQS, ECR và IAM/IRSA.
 Repo này cũng sở hữu Helm release Argo CD và root Application. Desired state phía trên Argo CD
 thuộc `iris-gitops`; AWS Load Balancer Controller tạo NLB và ExternalDNS tự reconcile hostname
 `api.<domain>` vào Route53.
@@ -17,6 +17,9 @@ thuộc `iris-gitops`; AWS Load Balancer Controller tạo NLB và ExternalDNS t�
 - `terraform/platform`: network, EKS, database, storage, registry, workload IAM,
   `helm_release.argocd` và root Application.
 - `environments/production.tfvars`: cấu hình production không nhạy cảm, review được bằng Git.
+  Profile triển khai hiện tại chịu guardrail của AWS Free Tier: EC2 eligible instance type,
+  RDS Single-AZ, backup một ngày và không storage autoscaling. Terraform vẫn hỗ trợ bật lại
+  Multi-AZ/retention dài khi account được nâng cấp.
 - `.github/workflows/terraform.yml`: required PR gate, validate toàn bộ và bắt buộc plan mọi root
   stack đã đổi; platform chỉ được defer khi cùng PR còn phải tạo domain trước.
 - `.github/workflows/production-infra.yml`: orchestrator duy nhất nhận push main; chọn stage
