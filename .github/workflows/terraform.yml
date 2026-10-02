@@ -99,9 +99,12 @@ jobs:
       - name: Validate GitHub configuration Terraform root
         working-directory: terraform/github-config
         run: terraform init -backend=false && terraform validate
-      - name: Validate domain
+      - name: Validate and test domain certificate planning
         working-directory: terraform/domain
-        run: terraform init -backend=false && terraform validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+          terraform test -filter=tests/certificate_validation.tftest.hcl
       - name: Validate platform
         working-directory: terraform/platform
         run: terraform init -backend=false && terraform validate
