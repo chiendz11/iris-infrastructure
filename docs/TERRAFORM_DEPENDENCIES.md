@@ -250,7 +250,7 @@ khi queue policy đã cho phép bucket gửi message.
 ```text
 VPC private subnets → RDS subnet group
 EKS node security group → RDS security group ingress :5432
-RDS PostgreSQL Multi-AZ
+RDS PostgreSQL (Single-AZ trong Free Tier profile; module hỗ trợ Multi-AZ)
   └── RDS-managed master secret in Secrets Manager
         └── External Secrets IRSA read policy
               ├── Kubernetes Secret cho MLflow

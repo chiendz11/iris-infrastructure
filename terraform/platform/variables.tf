@@ -119,6 +119,29 @@ variable "db_multi_az" {
   default     = true
 }
 
+variable "db_backup_retention_days" {
+  description = "Number of days RDS retains automated backups. Use the account plan's supported value; production accounts normally use 14 or more."
+  type        = number
+  default     = 14
+
+  validation {
+    condition     = var.db_backup_retention_days >= 0 && var.db_backup_retention_days <= 35 && floor(var.db_backup_retention_days) == var.db_backup_retention_days
+    error_message = "db_backup_retention_days must be a whole number between 0 and 35."
+  }
+}
+
+variable "db_max_allocated_storage" {
+  description = "Optional RDS storage autoscaling ceiling in GiB. Null disables storage autoscaling for account-constrained deployments."
+  type        = number
+  default     = 100
+  nullable    = true
+
+  validation {
+    condition     = var.db_max_allocated_storage == null || var.db_max_allocated_storage >= 20
+    error_message = "db_max_allocated_storage must be null or at least 20 GiB."
+  }
+}
+
 variable "db_name" {
   type    = string
   default = "mlflow"
