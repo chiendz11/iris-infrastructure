@@ -78,6 +78,13 @@ Redis HA và HAProxy của Argo CD dùng hard anti-affinity cùng topology sprea
 `kubernetes.io/hostname`. Không dùng `topology.kubernetes.io/hostname`: label đó không tồn tại trên
 EKS nodes và `DoNotSchedule` sẽ giữ toàn bộ Redis pods ở Pending cho tới khi Helm timeout.
 
+Application controller cần 1Gi request/2Gi limit vì lần sync đầu phải cache CRD của Argo,
+Knative, KServe và monitoring. Production values cũng giới hạn status processors, operation
+processors và kubectl parallelism cho cụm demo ba node. Nếu Root Application ở `Running` nhưng
+không có `syncResult`, kiểm tra `kubectl -n argocd get pod argocd-application-controller-0`
+trước khi retry; `OOMKilled` phải được sửa trong Helm values do Terraform quản lý, không
+patch StatefulSet live rồi để drift.
+
 Khi triển khai thật, kiểm tra `kubectl get csidrivers`, `kubectl get sc iris-training-gp3`,
 `kubectl -n argo get pvc`, `kubectl get pv`. PVC Pending trước Pod đầu tiên có thể là hành vi
 WaitForFirstConsumer bình thường; Pending kéo dài sau scheduling cần xem events/IAM/node capacity.
