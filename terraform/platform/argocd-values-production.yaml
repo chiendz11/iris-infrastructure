@@ -26,6 +26,12 @@ configs:
     application.resourceTrackingMethod: annotation
   params:
     server.insecure: false
+    # The demo cluster has many CRDs (Argo, Knative, KServe and monitoring).
+    # Bound controller concurrency so the first full discovery/sync does not
+    # overwhelm either the EKS API server or the controller heap.
+    controller.status.processors: "5"
+    controller.operation.processors: "3"
+    controller.kubectl.parallelism.limit: "5"
   rbac:
     policy.default: ""
     policy.matchMode: glob
@@ -64,8 +70,10 @@ controller:
     enabled: true
     minAvailable: 1
   resources:
-    requests: {cpu: 250m, memory: 512Mi}
-    limits: {cpu: "1", memory: 1Gi}
+    # One GiB was repeatedly OOMKilled while caching the production CRDs and
+    # left the root Application operation stuck before its first sync wave.
+    requests: {cpu: 500m, memory: 1Gi}
+    limits: {cpu: "1", memory: 2Gi}
   metrics:
     enabled: true
 
