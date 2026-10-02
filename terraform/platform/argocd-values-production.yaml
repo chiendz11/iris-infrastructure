@@ -55,7 +55,7 @@ redis-ha:
       enabled: true
   topologySpreadConstraints:
     enabled: true
-    topologyKey: topology.kubernetes.io/hostname
+    topologyKey: kubernetes.io/hostname
     whenUnsatisfiable: DoNotSchedule
 
 controller:

@@ -74,6 +74,10 @@ thay default StorageClass của cluster. WorkflowTemplate chọn class này cho 
 CSI tự tạo PV/EBS đúng AZ; không tạo aws_ebs_volume/PV tĩnh từ Terraform. Model/data bền vững ở
 S3/MLflow; workspace bị dọn khi Workflow kết thúc cả success/failure. Xem `iris-gitops/docs/TRAINING_STORAGE.md`.
 
+Redis HA và HAProxy của Argo CD dùng hard anti-affinity cùng topology spread trên node label chuẩn
+`kubernetes.io/hostname`. Không dùng `topology.kubernetes.io/hostname`: label đó không tồn tại trên
+EKS nodes và `DoNotSchedule` sẽ giữ toàn bộ Redis pods ở Pending cho tới khi Helm timeout.
+
 Khi triển khai thật, kiểm tra `kubectl get csidrivers`, `kubectl get sc iris-training-gp3`,
 `kubectl -n argo get pvc`, `kubectl get pv`. PVC Pending trước Pod đầu tiên có thể là hành vi
 WaitForFirstConsumer bình thường; Pending kéo dài sau scheduling cần xem events/IAM/node capacity.
